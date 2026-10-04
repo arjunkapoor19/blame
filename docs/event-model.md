@@ -35,7 +35,20 @@ Statuses: `in_progress`, `completed`, `failed`, `declined`, `interrupted` (the t
 
 Rule: an adapter never drops an agent record it doesn't understand. It becomes a `tool_call` with the native record in `payload.raw`.
 
-## Codex mapping
+Commands carry `payload.actions`, each typed `read`, `list`, `search` or `other`. Adapters map their agent's own names onto these.
+
+## Sources
+
+`agent_history/sources.py` registers every source of history, and is the only place adapters are named. A `Source` has a name, a priority, a way to discover its records on this machine, a test for whether a path is one of its records, and the adapter that normalizes it. Supporting a new agent means writing its adapter and adding one `Source`.
+
+| source | priority | discovered automatically | adapter |
+|---|---|---|---|
+| `codex-capture` | 2 | no (`ah ingest <capture dir>`) | `adapters/codex.py` |
+| `codex-log` | 1 | `$CODEX_HOME/sessions/**/rollout-*.jsonl` (default `~/.codex`) | `adapters/codex_rollout.py` |
+
+`ah log` and `ah blame` sync every source first, re-reading only files whose size or modification time changed. When two sources hold the same agent run (they share thread ids), the higher priority wins: a lower-priority record is skipped, and a higher-priority one replaces what's stored. A session is never stored twice.
+
+## Codex App Server mapping
 
 Source: Codex App Server JSON-RPC (see `protocol-notes.md`), adapter `agent_history/adapters/codex.py`.
 
@@ -61,6 +74,22 @@ Source: Codex App Server JSON-RPC (see `protocol-notes.md`), adapter `agent_hist
 - `item/*/delta` streaming chunks. These are usually most of a capture, and the full text repeats on `item/completed`.
 - `turn/diff/updated`. This is the turn's cumulative git diff, kept for later recovery of edits made through shell commands.
 - `thread/status/changed`, `serverRequest/resolved`, `account/rateLimits/updated`, `mcpServer/startupStatus/updated`, `remoteControl/status/changed`, and JSON-RPC responses. These are plumbing.
+
+## Codex session log mapping
+
+Source: the log Codex writes for every session, however it was started, at `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. Adapter: `agent_history/adapters/codex_rollout.py`. Log items mirror App Server items, so the adapter converts each one to the App Server shape and reuses that mapping.
+
+| Codex log record | canonical |
+|---|---|
+| `session_meta` | `Session` (`id` = Codex thread id, `cli_version`, `cwd`) |
+| `event_msg` `task_started` / `task_complete` / `turn_aborted` | `Turn` opened / `completed` / its `reason` (e.g. `interrupted`); never closed → `incomplete` |
+| `event_msg` `item_completed`: `UserMessage`, `AgentMessage`, `Reasoning`, `CommandExecution`, `FileChange`, `Extension` (`web.search`) | as their App Server equivalents. Commands: argv joined and unwrapped, `file://` stripped from `cwd`, `duration` → `duration_ms`, `parsed_cmd` → `actions` |
+| a command completed after its turn was aborted (logged as failed, exit code -1) | `command` with status `interrupted` |
+| `event_msg` `token_count` | `token_usage` |
+
+**Ignored:** `response_item` (raw model input and output, which duplicates the items and includes encrypted reasoning), `world_state`, `turn_context`, `token_usage_record` and `thread_settings_applied`.
+
+Compared with a capture, a log has no approvals and no streaming. That's why captures have the higher priority.
 
 ## Blame
 

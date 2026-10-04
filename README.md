@@ -2,7 +2,7 @@
 
 An observability and history layer for AI coding agents. Git tells you what changed; Agent History tells you what the agent did that caused those changes.
 
-The current prototype records **Codex** sessions through the Codex App Server's JSON-RPC protocol (stdio transport), normalizes them into an agent-agnostic event model stored in SQLite, and answers "why does this line exist?" with `ah blame`. It doesn't scrape terminal output or modify Codex.
+The current prototype reads the session logs **Codex** already writes, normalizes them into an agent-agnostic event model stored in SQLite, and answers "why does this line exist?" with `ah blame`. Use Codex exactly as you normally do; there is nothing to set up. An optional recorder captures richer detail through the Codex App Server protocol.
 
 ```text
 $ ah blame shop.py:6
@@ -28,8 +28,10 @@ You asked: "apply_discount in shop.py is buggy. Write unittest tests in test_sho
 
 ```
 recorder/codex_recorder.py   records one Codex session (stdlib-only Python 3.9+)
-agent_history/               canonical model, adapters, SQLite store, blame, `ah` CLI
-  adapters/codex.py          Codex capture -> canonical events
+agent_history/               canonical model, SQLite store, blame, `ah` CLI
+  sources.py                 every source of agent history, and syncing them
+  adapters/codex.py          Codex recorder capture -> canonical events
+  adapters/codex_rollout.py  Codex's own session logs -> canonical events
 tests/                       pytest suite; fixtures/ holds sanitized real captures
 codex-schema/                App Server schemas generated from the installed Codex (currently 0.155.1)
 docs/event-model.md          the canonical model, the Codex mapping, and how blame works
@@ -43,19 +45,27 @@ Requires [uv](https://docs.astral.sh/uv/). There are no runtime dependencies bey
 
 ```sh
 uv sync
-uv run ah ingest captures/<session-dir>...    # normalize captures into the database
+codex                                         # use Codex as usual, then:
+uv run ah blame path/to/file.py:42            # why does line 42 exist? (picks up new sessions automatically)
+```
+
+```sh
 uv run ah log                                 # list sessions
 uv run ah log <session>                       # one session's timeline (any unique part of the id)
 uv run ah blame path/to/file.py               # which agent event wrote each line
 uv run ah blame path/to/file.py:42            # one line: the story of the turn that wrote it
+uv run ah ingest                              # sync agent logs explicitly and list what was loaded
+uv run ah ingest captures/<session-dir>       # load a recorder capture (wins over the log of the same session)
 uv run pytest                                 # tests
 ```
 
-The database defaults to `~/.agent-history/history.db`. Override it with `--db` or `$AGENT_HISTORY_DB`. Re-ingesting a capture replaces it.
+`ah log` and `ah blame` first sync Codex's session logs (`$CODEX_HOME/sessions`, default `~/.codex/sessions`), reading only new or changed files. The database defaults to `~/.agent-history/history.db`. Override it with `--db` or `$AGENT_HISTORY_DB`. Each agent run is stored once, even if it was both logged and captured.
 
 Blame aligns recorded history with the file on disk, so lines edited by hand afterwards aren't blamed on the agent. It can't yet see edits the agent made through shell commands (`sed -i`, `echo >>`); see `docs/event-model.md`.
 
-## Recording a session
+## Recording a session (optional)
+
+Codex's own logs are enough for `ah blame`. The recorder adds approvals, commands still running when a turn was interrupted, and the full streaming protocol.
 
 ```sh
 python3 recorder/codex_recorder.py --cwd /path/to/project 'first prompt' 'follow-up prompt'

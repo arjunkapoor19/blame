@@ -34,6 +34,7 @@ DECLINE_DECISIONS = {"decline", "denied", "cancel", "abort"}
 TOOL_ITEMS = {"mcpToolCall", "dynamicToolCall", "functionCallOutput", "webSearch"}
 SUBAGENT_ITEMS = {"collabAgentToolCall", "subAgentActivity"}
 
+ACTIONS = {"read": model.READ, "listFiles": model.LIST, "search": model.SEARCH}
 STATUSES = {"inProgress": "in_progress", "completed": "completed", "failed": "failed",
             "declined": "declined", "interrupted": "interrupted"}
 
@@ -244,8 +245,8 @@ def _translate(item: dict[str, Any]) -> tuple[str, dict[str, Any], list[FileChan
             exit_code=item.get("exitCode"),
             output=item.get("aggregatedOutput"),
             duration_ms=item.get("durationMs"),
-            actions=[{"type": a.get("type"), "path": a.get("path"), "command": a.get("command")}
-                     for a in item.get("commandActions") or []],
+            actions=[{"type": ACTIONS.get(a.get("type"), model.OTHER), "path": a.get("path"),
+                      "command": a.get("command")} for a in item.get("commandActions") or []],
         )
         return model.COMMAND, payload, []
     if native == "fileChange":

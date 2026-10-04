@@ -6,10 +6,10 @@ import argparse
 import os
 import sys
 from datetime import datetime, timezone
+from collections import Counter
 from pathlib import Path
 
-from agent_history import model
-from agent_history.adapters import codex
+from agent_history import model, sources
 from agent_history.blame import BlamedLine, FileBlame, blame, story
 from agent_history.commands import is_test, read_only_label, summarize
 from agent_history.model import Event
@@ -23,8 +23,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--db", default=str(default_db_path()),
                         help="SQLite database (default: $AGENT_HISTORY_DB or ~/.agent-history/history.db)")
     commands = parser.add_subparsers(dest="command", required=True)
-    ingest = commands.add_parser("ingest", help="Normalize recorded sessions into the database.")
-    ingest.add_argument("sources", nargs="+", help="Capture directories written by recorder/codex_recorder.py")
+    ingest = commands.add_parser("ingest", help="Load agent sessions into the database (default: sync all).")
+    ingest.add_argument("paths", nargs="*",
+                        help="Session records to load, e.g. a recorder capture directory or an agent's log "
+                             "file. Without paths, sync every agent's logs on this machine.")
     log = commands.add_parser("log", help="List sessions, or show one session's timeline.")
     log.add_argument("session", nargs="?", help="Session id (or a unique part of it)")
     blame_cmd = commands.add_parser("blame", help="Show which agent event wrote each line of a file.")
@@ -34,7 +36,8 @@ def main(argv: list[str] | None = None) -> int:
     store = Store(args.db)
     try:
         if args.command == "ingest":
-            return cmd_ingest(store, args.sources)
+            return cmd_ingest(store, args.paths)
+        _report_sync(sources.sync(store))
         if args.command == "log":
             return cmd_log(store, args.session)
         return cmd_blame(store, args.target)
@@ -45,19 +48,34 @@ def main(argv: list[str] | None = None) -> int:
         store.close()
 
 
-def cmd_ingest(store: Store, sources: list[str]) -> int:
-    status = 0
-    for source in sources:
-        if not (Path(source) / "events.jsonl").is_file():
-            print(f"ah: {source}: not a capture directory (no events.jsonl)", file=sys.stderr)
-            status = 1
-            continue
-        normalized = codex.normalize(source)
-        store.ingest(normalized)
-        changes = sum(len(e.file_changes) for e in normalized.events)
-        print(f"ingested {normalized.session.id}: {len(normalized.turns)} turns, "
-              f"{len(normalized.events)} events, {changes} file changes")
-    return status
+def cmd_ingest(store: Store, paths: list[str]) -> int:
+    if not paths:
+        results = sources.sync(store)
+        if not results:
+            print("everything is up to date")
+    else:
+        results = []
+        for path in paths:
+            try:
+                results.append(sources.ingest(store, Path(path)))
+            except LookupError as error:
+                print(f"ah: {error.args[0]}", file=sys.stderr)
+                return 1
+    for result in results:
+        detail = f": {result.reason}" if result.reason else ""
+        print(f"{result.status:<8} {result.session_id or '-'}  ({result.source}) {result.path}{detail}")
+    return 1 if any(r.status == sources.FAILED for r in results) else 0
+
+
+def _report_sync(results: list[sources.Result]) -> None:
+    """One quiet line on stderr when the automatic sync picked something up."""
+    ingested = Counter(r.source for r in results if r.status == sources.INGESTED)
+    failed = [r for r in results if r.status == sources.FAILED]
+    if ingested:
+        by_source = ", ".join(f"{name}: {count}" for name, count in sorted(ingested.items()))
+        print(f"synced {sum(ingested.values())} new or updated sessions ({by_source})", file=sys.stderr)
+    for result in failed:
+        print(f"warning: could not read {result.path}: {result.reason}", file=sys.stderr)
 
 
 def cmd_log(store: Store, query: str | None) -> int:
@@ -121,7 +139,7 @@ def _blame_line(store: Store, path: str, line: BlamedLine) -> int:
     cwd = session["cwd"] if session else None
     turn = store.turn(origin.turn_id) if origin.turn_id else None
     print(f"written by {session['agent'] if session else 'an agent'} · session {origin.session_id} · "
-          f"turn {turn['seq'] if turn else '?'} · {_time(origin.started_at, date=True)} UTC\n")
+          f"turn {turn['seq'] if turn else '?'} · {_time(origin.started_at, date=True)}\n")
 
     told = story(store, origin)
     if told.prompt:
@@ -208,8 +226,8 @@ def _quote(text: str | None, limit: int) -> str:
 def _time(ms: int | None, date: bool = False) -> str:
     if ms is None:
         return "--:--:--"
-    moment = datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
-    return moment.strftime("%Y-%m-%d %H:%M:%S" if date else "%H:%M:%S")
+    moment = datetime.fromtimestamp(ms / 1000, tz=timezone.utc).astimezone()  # the viewer's local time
+    return moment.strftime("%Y-%m-%d %H:%M:%S %Z" if date else "%H:%M:%S")
 
 
 def _duration(start: int | None, end: int | None) -> str:

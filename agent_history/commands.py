@@ -11,6 +11,8 @@ import os
 import re
 from typing import Any
 
+from agent_history import model
+
 # A test runner at the start of a command segment (`cd x && pytest`, `a; npm test`), optionally
 # behind env vars, a path (`./gradlew`, `.venv/bin/pytest`) or a wrapper (`uv run`, `npx`).
 SEGMENT_SPLIT = re.compile(r"&&|\|\||[;|()]")
@@ -42,7 +44,7 @@ ERROR_LINES = (
     re.compile(r"^(?:E\s+)?([\w.]*(?:Error|Exception)\b(?::.*)?)$"),  # Python exceptions, pytest `E` lines
     re.compile(r"^(error(?:\[\w+\])?:.+)$"),  # rustc, tsc and friends
 )
-READ_ONLY_ACTIONS = {"read", "listFiles", "search"}
+READ_ONLY_ACTIONS = {model.READ, model.LIST, model.SEARCH}
 LIMIT = 100
 
 
@@ -87,9 +89,9 @@ def read_only_label(payload: dict[str, Any]) -> str | None:
         return None
     labels: list[str] = []
     for action in actions:
-        if action["type"] == "read":
+        if action["type"] == model.READ:
             label = os.path.basename(action.get("path") or "") or action.get("command") or "file"
-        elif action["type"] == "listFiles":
+        elif action["type"] == model.LIST:
             label = "list files"
         else:
             label = f"search: {action.get('command')}"

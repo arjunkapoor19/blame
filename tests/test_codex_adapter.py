@@ -63,7 +63,8 @@ def test_commands_are_unwrapped_and_failures_kept():
     assert commands[0].payload["command"] == "cat README.md && rg --files"
     assert [(c.status, c.payload["exit_code"]) for c in commands[1:]] == [
         ("completed", 0), ("failed", 1), ("completed", 0)]
-    assert commands[0].payload["actions"][0]["type"] == "read"
+    assert [a["type"] for a in commands[0].payload["actions"]] == ["read", "list"]
+    assert [a["type"] for a in commands[1].payload["actions"]] == ["other"]
 
 
 def test_file_changes():

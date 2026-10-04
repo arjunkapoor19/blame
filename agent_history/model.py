@@ -30,6 +30,9 @@ KINDS = (USER_MESSAGE, AGENT_MESSAGE, REASONING, COMMAND, FILE_CHANGE, TOOL_CALL
 # File change kinds.
 ADD, UPDATE, DELETE, MOVE = "add", "update", "delete", "move"
 
+# What a command does, as far as the agent can tell (payload["actions"][i]["type"]).
+READ, LIST, SEARCH, OTHER = "read", "list", "search", "other"
+
 
 @dataclass
 class Session:

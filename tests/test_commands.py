@@ -90,9 +90,9 @@ def test_verdict():
 
 
 def test_read_only_label():
-    actions = [{"type": "read", "path": "/w/shop.py"}, {"type": "listFiles", "command": "ls"},
+    actions = [{"type": "read", "path": "/w/shop.py"}, {"type": "list", "command": "ls"},
                {"type": "read", "path": "/w/shop.py"}]
     assert read_only_label({"actions": actions}) == "shop.py, list files"
     assert read_only_label({"actions": [{"type": "search", "command": "rg add"}]}) == "search: rg add"
-    assert read_only_label({"actions": actions + [{"type": "unknown"}]}) is None
+    assert read_only_label({"actions": actions + [{"type": "other"}]}) is None
     assert read_only_label({"actions": []}) is None

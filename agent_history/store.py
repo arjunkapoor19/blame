@@ -63,6 +63,11 @@ CREATE TABLE IF NOT EXISTS file_changes (
     PRIMARY KEY (event_id, idx)
 );
 CREATE INDEX IF NOT EXISTS file_changes_by_path ON file_changes(path);
+CREATE TABLE IF NOT EXISTS synced_files (
+    path     TEXT PRIMARY KEY,
+    mtime_ns INTEGER NOT NULL,
+    size     INTEGER NOT NULL
+);
 """
 
 
@@ -78,18 +83,27 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")
         self.db.executescript(SCHEMA)
+        columns = {row["name"] for row in self.db.execute("PRAGMA table_info(sessions)")}
+        if "source_kind" not in columns:  # databases created before sources had names
+            self.db.execute("ALTER TABLE sessions ADD COLUMN source_kind TEXT")
 
     def close(self) -> None:
         self.db.close()
 
-    def ingest(self, normalized: NormalizedSession) -> None:
-        """Insert a session, replacing any earlier ingest of the same session."""
+    def ingest(self, normalized: NormalizedSession, source_kind: str | None = None) -> None:
+        """Insert a session, replacing any earlier ingest of it, including one from another
+        source that shares its threads (the same agent run, recorded two ways)."""
         s = normalized.session
+        thread_ids = [t.id for t in normalized.threads]
         with self.db:
             self.db.execute("DELETE FROM sessions WHERE id = ?", (s.id,))
-            self.db.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?)",
+            self.db.executemany(
+                "DELETE FROM sessions WHERE id IN (SELECT session_id FROM threads WHERE id = ?)",
+                [(t,) for t in thread_ids])
+            self.db.execute("INSERT INTO sessions (id, agent, agent_version, cwd, started_at, ended_at, outcome, "
+                            "source, source_kind) VALUES (?,?,?,?,?,?,?,?,?)",
                             (s.id, s.agent, s.agent_version, s.cwd, s.started_at, s.ended_at,
-                             s.outcome, s.source))
+                             s.outcome, s.source, source_kind))
             self.db.executemany("INSERT INTO threads VALUES (?,?,?)",
                                 [(t.id, s.id, t.parent_thread_id) for t in normalized.threads])
             self.db.executemany("INSERT INTO turns VALUES (?,?,?,?,?,?,?,?)",
@@ -151,6 +165,23 @@ class Store:
             WHERE e.status IS NULL OR e.status NOT IN ('declined', 'failed')
             ORDER BY e.started_at, e.session_id, e.seq, f.idx
         """).fetchall()
+
+    def owner_of_threads(self, thread_ids: list[str]) -> sqlite3.Row | None:
+        """The stored session that already holds any of these threads, if one does."""
+        for thread_id in thread_ids:
+            row = self.db.execute("SELECT s.* FROM sessions s JOIN threads t ON t.session_id = s.id "
+                                  "WHERE t.id = ?", (thread_id,)).fetchone()
+            if row is not None:
+                return row
+        return None
+
+    def file_unchanged(self, path: str, mtime_ns: int, size: int) -> bool:
+        row = self.db.execute("SELECT mtime_ns, size FROM synced_files WHERE path = ?", (path,)).fetchone()
+        return row is not None and (row["mtime_ns"], row["size"]) == (mtime_ns, size)
+
+    def mark_synced(self, path: str, mtime_ns: int, size: int) -> None:
+        with self.db:
+            self.db.execute("INSERT OR REPLACE INTO synced_files VALUES (?,?,?)", (path, mtime_ns, size))
 
     def counts(self) -> dict[str, int]:
         tables = ("sessions", "threads", "turns", "events", "file_changes")
