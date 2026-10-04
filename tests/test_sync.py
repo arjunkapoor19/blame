@@ -134,3 +134,22 @@ def test_cli_ingest_without_paths_syncs(tmp_path, codex_home, capsys):
     install_log(codex_home)
     assert main(["--db", db, "ingest"]) == 0
     assert "ingested 01a10714-203f-7172-a0a4-09521747b2ad  (codex-log)" in capsys.readouterr().out
+
+
+def test_stored_sessions_are_renormalized_when_adapters_change(tmp_path, codex_home):
+    store = Store(tmp_path / "h.db")
+    assert sources.ingest(store, SHOP_CAPTURE).status == INGESTED
+    install_log(codex_home)
+    sources.sync(store)
+    assert store.model_version() == model.VERSION
+    # Simulate sessions normalized by an older adapter.
+    store.db.execute("UPDATE events SET payload = '{}'")
+    store.db.commit()
+    store.db.execute("DELETE FROM meta")
+    store.db.commit()
+
+    results = sources.sync(store)
+    assert [(r.source, r.status) for r in results] == [("codex-capture", INGESTED), ("codex-log", SKIPPED)]
+    assert all(e.payload for e in store.events(session_id=SHOP_CAPTURE.name))
+    assert store.model_version() == model.VERSION
+    assert sources.sync(store) == []  # nothing left to do

@@ -12,6 +12,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+# Bump whenever adapters change what they produce for the same input: stored sessions are
+# then re-normalized from their sources on the next sync.
+VERSION = 2
+
 # What an event is. Adapters must map every native record to one of these;
 # anything unrecognised becomes TOOL_CALL with its raw payload, never dropped.
 USER_MESSAGE = "user_message"

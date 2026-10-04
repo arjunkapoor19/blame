@@ -5,8 +5,9 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from datetime import datetime, timezone
+import textwrap
 from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_history import model, sources
@@ -14,6 +15,11 @@ from agent_history.blame import BlamedLine, FileBlame, blame, story
 from agent_history.commands import is_test, read_only_label, summarize
 from agent_history.model import Event
 from agent_history.store import Store, default_db_path
+
+DIFF_PREVIEW = 12  # diff lines shown per file for edits other than the one that wrote the line
+DETAIL = " " * 21  # indents an event's details under its text in a story
+WIDTH = 100
+DIFF_COLORS = {"+": "32", "-": "31"}
 
 COMMAND_MARKS = {"completed": "✓", "failed": "✗", "declined": "⊘", "interrupted": "…", "incomplete": "…"}
 
@@ -147,11 +153,15 @@ def _blame_line(store: Store, path: str, line: BlamedLine) -> int:
     if told.hidden_before:
         print(f"    … {told.hidden_before} earlier steps (ah log {origin.session_id})")
     for event in told.steps:
-        text = describe(event, cwd)
+        lines = _story_lines(event, cwd, path, line.text if event.id == origin.id else None)
+        if not lines:
+            continue
         if event.id == origin.id:
-            print(f"▶ {_time(event.started_at)}  {text}   ← wrote this line")
-        elif text:
-            print(f"  {_time(event.started_at)}  {text}")
+            print(f"▶ {_time(event.started_at)}  {lines[0]}   ← wrote this line")
+        else:
+            print(f"  {_time(event.started_at)}  {lines[0]}")
+        for detail in lines[1:]:
+            print(DETAIL + detail)
 
     if line.rewrites:
         print(f"\nLine history (oldest first; rewritten {line.rewrites} time{'s' if line.rewrites > 1 else ''})")
@@ -159,6 +169,62 @@ def _blame_line(store: Store, path: str, line: BlamedLine) -> int:
             print(f"  {_who(store, event) if event else '?':<22}  {text}")
     print("\nSteps are shown in order; order is not proof of cause.")
     return 0
+
+
+def _story_lines(event: Event, cwd: str | None, blamed_path: str, blamed_text: str | None) -> list[str]:
+    """An event in a blame story: its summary line, then details (full messages, diffs).
+
+    `blamed_text` is set for the event that wrote the blamed line: its diff for the blamed
+    file is shown in full, with the line marked. Other diffs are previews.
+    """
+    if event.kind == model.AGENT_MESSAGE:
+        label = "answer" if event.payload.get("phase") == "final" else "agent"
+        wrapped = _wrap(event.payload.get("text") or "", WIDTH - len(DETAIL))
+        return [f"{label:<8} {wrapped[0] if wrapped else ''}"] + wrapped[1:]
+    summary = describe(event, cwd)
+    if summary is None or event.kind != model.FILE_CHANGE:
+        return [summary] if summary else []
+    details: list[str] = []
+    for change in event.file_changes:
+        if len(event.file_changes) > 1:
+            details.append(_relative(change.path, cwd) + ":")
+        full = blamed_text is not None and change.path == blamed_path
+        details += _diff_lines(change, None if full else DIFF_PREVIEW, blamed_text if full else None)
+    return [summary] + details
+
+
+def _diff_lines(change: model.FileChange, limit: int | None, mark: str | None) -> list[str]:
+    """A file change as diff lines (at most `limit`), flagging the first added line equal to `mark`."""
+    if change.kind == model.DELETE:
+        return ["│ " + _color("31", "(file deleted)")]
+    raw = change.diff or ""
+    lines = ["+" + text for text in raw.splitlines()] if change.kind == model.ADD else raw.splitlines()
+    shown = lines if limit is None else lines[:limit]
+    out = []
+    for text in shown:
+        rendered = "│ " + _color("2" if text.startswith("@@") else DIFF_COLORS.get(text[:1], ""), text)
+        if mark is not None and text[:1] == "+" and text[1:] == mark:
+            rendered += "   ← this line"
+            mark = None
+        out.append(rendered)
+    if len(lines) > len(shown):
+        out.append("│ " + _color("2", f"… {len(lines) - len(shown)} more lines"))
+    return out
+
+
+def _color(code: str, text: str) -> str:
+    """ANSI colour, only when writing to a terminal and NO_COLOR isn't set."""
+    if not code or not sys.stdout.isatty() or "NO_COLOR" in os.environ:
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+
+def _wrap(text: str, width: int) -> list[str]:
+    """Wrap each line of `text` separately, so paragraphs and lists keep their shape."""
+    lines: list[str] = []
+    for paragraph in text.strip().splitlines():
+        lines += textwrap.wrap(paragraph, width) or [""]
+    return lines
 
 
 def _who(store: Store, event: Event) -> str:

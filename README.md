@@ -9,19 +9,31 @@ $ ah blame shop.py:6
 shop.py:6
         return price * (1 - percent / 100)
 
-written by codex · session 20261004T132159Z-39de3d · turn 1 · 2026-10-04 13:22:33 UTC
+written by codex · session 20261004T132159Z-39de3d · turn 1 · 2026-10-04 18:52:33 IST
 
 You asked: "apply_discount in shop.py is buggy. Write unittest tests in test_shop.py that expose it, run them and watch them fail, then fix the bug and rerun until they pass."
 
-  13:22:12  read     shop.py, list files
-  13:22:20  edit     +test_shop.py
-  13:22:20  test     ✗ python -m unittest -v  → command not found
-  13:22:23  test     ✗ python3 -m unittest -v  → 3 tests, 1 failed · AssertionError: -25 != 0
-  13:22:26  agent    The first run exposed one bug, but the 20% test used a $100 price, which accidentally passed the cu…
-  13:22:29  edit     ~test_shop.py
-  13:22:30  test     ✗ python3 -m unittest -v  → 3 tests, 2 failed · AssertionError: -25 != 0
-▶ 13:22:33  edit     ~shop.py   ← wrote this line
-  13:22:34  test     ✓ python3 -m unittest -v  → 3 tests passed
+  18:52:20  edit     +test_shop.py
+                     │ +import unittest
+                     │ …
+  18:52:20  test     ✗ python -m unittest -v  → command not found
+  18:52:23  test     ✗ python3 -m unittest -v  → 3 tests, 1 failed · AssertionError: -25 != 0
+  18:52:26  agent    The first run exposed one bug, but the 20% test used a $100 price, which
+                     accidentally passed the current subtraction implementation. I'm strengthening
+                     that case with a different price so it checks percentage math directly, then
+                     I'll correct `apply_discount`.
+  18:52:29  edit     ~test_shop.py
+                     │ @@ -7,3 +7,3 @@
+                     │      def test_applies_percentage_to_price(self):
+                     │ -        self.assertEqual(apply_discount(100, 20), 80)
+                     │ +        self.assertEqual(apply_discount(200, 20), 160)
+  18:52:30  test     ✗ python3 -m unittest -v  → 3 tests, 2 failed · AssertionError: -25 != 0
+▶ 18:52:33  edit     ~shop.py   ← wrote this line
+                     │ @@ -5,3 +5,3 @@
+                     │  def apply_discount(price, percent):
+                     │ -    return price - percent
+                     │ +    return price * (1 - percent / 100)   ← this line
+  18:52:34  test     ✓ python3 -m unittest -v  → 3 tests passed
 ```
 
 ## Layout

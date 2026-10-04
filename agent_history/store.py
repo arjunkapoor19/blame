@@ -8,7 +8,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from agent_history.model import FILE_CHANGE, Event, FileChange, NormalizedSession
+from agent_history.model import FILE_CHANGE, VERSION as MODEL_VERSION, Event, FileChange, NormalizedSession
 
 DEFAULT_DB = Path.home() / ".agent-history" / "history.db"
 
@@ -63,6 +63,10 @@ CREATE TABLE IF NOT EXISTS file_changes (
     PRIMARY KEY (event_id, idx)
 );
 CREATE INDEX IF NOT EXISTS file_changes_by_path ON file_changes(path);
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS synced_files (
     path     TEXT PRIMARY KEY,
     mtime_ns INTEGER NOT NULL,
@@ -86,6 +90,8 @@ class Store:
         columns = {row["name"] for row in self.db.execute("PRAGMA table_info(sessions)")}
         if "source_kind" not in columns:  # databases created before sources had names
             self.db.execute("ALTER TABLE sessions ADD COLUMN source_kind TEXT")
+        if self.model_version() is None and not self.db.execute("SELECT 1 FROM sessions LIMIT 1").fetchone():
+            self.set_model_version(MODEL_VERSION)  # a new database: nothing to re-normalize
 
     def close(self) -> None:
         self.db.close()
@@ -182,6 +188,19 @@ class Store:
     def mark_synced(self, path: str, mtime_ns: int, size: int) -> None:
         with self.db:
             self.db.execute("INSERT OR REPLACE INTO synced_files VALUES (?,?,?)", (path, mtime_ns, size))
+
+    def model_version(self) -> int | None:
+        """The model version stored sessions were normalized with (None: unknown, i.e. older)."""
+        row = self.db.execute("SELECT value FROM meta WHERE key = 'model_version'").fetchone()
+        return int(row["value"]) if row else None
+
+    def set_model_version(self, version: int) -> None:
+        with self.db:
+            self.db.execute("INSERT OR REPLACE INTO meta VALUES ('model_version', ?)", (str(version),))
+
+    def forget_synced(self) -> None:
+        with self.db:
+            self.db.execute("DELETE FROM synced_files")
 
     def counts(self) -> dict[str, int]:
         tables = ("sessions", "threads", "turns", "events", "file_changes")

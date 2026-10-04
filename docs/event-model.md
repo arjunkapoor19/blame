@@ -46,7 +46,7 @@ Commands carry `payload.actions`, each typed `read`, `list`, `search` or `other`
 | `codex-capture` | 2 | no (`ah ingest <capture dir>`) | `adapters/codex.py` |
 | `codex-log` | 1 | `$CODEX_HOME/sessions/**/rollout-*.jsonl` (default `~/.codex`) | `adapters/codex_rollout.py` |
 
-`ah log` and `ah blame` sync every source first, re-reading only files whose size or modification time changed. When two sources hold the same agent run (they share thread ids), the higher priority wins: a lower-priority record is skipped, and a higher-priority one replaces what's stored. A session is never stored twice.
+`ah log` and `ah blame` sync every source first, re-reading only files whose size or modification time changed. When adapters change what they produce, `model.VERSION` is bumped. The next sync then rebuilds every stored session from the source path it remembers, so old sessions never keep stale normalized data. When two sources hold the same agent run (they share thread ids), the higher priority wins: a lower-priority record is skipped, and a higher-priority one replaces what's stored. A session is never stored twice.
 
 ## Codex App Server mapping
 
@@ -100,6 +100,8 @@ When the file exists on disk, the replayed lines are aligned with its current co
 ### The story behind a line
 
 `ah blame file:N` prints the turn that wrote the line as an ordered list of steps: the prompt, the agent's messages, files it read, edits, and commands. Up to 12 steps before the change are shown, then the change itself (marked `▶`), then the steps after it up to the next test run, then the turn's final answer. Order is not proof of cause, and the output says so.
+
+Agent messages are shown in full. Every edit shows its diff: the edit that wrote the line shows its full diff for that file, with the line marked `← this line`, and other edits show their first 12 diff lines. So a change to a test just before the fix is visible, not just named. Diffs are coloured when writing to a terminal (`NO_COLOR` turns this off).
 
 ### Evidence from commands
 

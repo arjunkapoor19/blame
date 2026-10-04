@@ -63,3 +63,22 @@ def test_cli_end_to_end(tmp_path, capsys):
     assert "rewritten 2 times" in out
 
     assert main(["--db", db, "blame", "/workspace/missing.py"]) == 1
+
+
+def test_cli_blame_shows_what_the_agent_did(tmp_path, capsys):
+    db = str(tmp_path / "h.db")
+    assert main(["--db", db, "ingest", str(FIXTURES / "20261004T132159Z-39de3d")]) == 0
+    capsys.readouterr()
+    assert main(["--db", db, "blame", "/workspace/shop.py:6"]) == 0
+    out = capsys.readouterr().out
+    detail = " " * 21 + "│ "
+    # The edit that wrote the line: full diff for shop.py, with the line marked.
+    assert detail + "-    return price - percent\n" in out
+    assert detail + "+    return price * (1 - percent / 100)   ← this line\n" in out
+    # An earlier edit to the test file is shown, not just named.
+    assert detail + "+        self.assertEqual(apply_discount(200, 20), 160)\n" in out
+    # A new file is previewed, not dumped.
+    assert detail + "… 6 more lines\n" in out
+    # Agent messages are shown in full.
+    assert "I’ll correct `apply_discount`." in out  # the end of a 230-character message
+    assert "\033[" not in out  # no colour codes when not writing to a terminal

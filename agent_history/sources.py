@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
+from agent_history import model
 from agent_history.adapters import codex, codex_rollout
 from agent_history.model import NormalizedSession
 from agent_history.store import Store
@@ -64,7 +65,7 @@ def ingest(store: Store, path: Path, sources: list[Source] = SOURCES) -> Result:
 
 def sync(store: Store, sources: list[Source] = SOURCES) -> list[Result]:
     """Ingest every discoverable record that is new or changed since the last sync."""
-    results = []
+    results = _renormalize(store, sources) if store.model_version() != model.VERSION else []
     for source in sources:
         for path in source.discover():
             try:
@@ -77,6 +78,28 @@ def sync(store: Store, sources: list[Source] = SOURCES) -> list[Result]:
             results.append(_ingest(store, source, path, sources))
             store.mark_synced(key, stat.st_mtime_ns, stat.st_size)  # failures too, until the file changes
     return results
+
+
+def _renormalize(store: Store, sources: list[Source]) -> list[Result]:
+    """Adapters changed since these sessions were stored: rebuild every session from its source.
+
+    Sources found automatically are simply re-read by the sync that follows; the rest (such as
+    captures loaded by path) are re-ingested here from the path each session remembers.
+    """
+    store.forget_synced()
+    results = []
+    for row in store.sessions():
+        source = _source_of(row, sources)
+        path = Path(row["source"])
+        if source is not None and path.exists() and not _discoverable(source, path):
+            results.append(_ingest(store, source, path, sources))
+    store.set_model_version(model.VERSION)
+    return results
+
+
+def _discoverable(source: Source, path: Path) -> bool:
+    resolved = path.resolve()
+    return any(found.resolve() == resolved for found in source.discover())
 
 
 def _ingest(store: Store, source: Source, path: Path, sources: list[Source]) -> Result:
