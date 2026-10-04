@@ -1,0 +1,40 @@
+{
+  "recorder": {
+    "name": "agent-history-recorder",
+    "version": "0.2.0"
+  },
+  "codex": {
+    "bin": "codex",
+    "version": "codex-cli 0.155.1"
+  },
+  "settings": {
+    "cwd": "/workspace",
+    "model": null,
+    "sandbox": "workspace-write",
+    "approval_policy": "never",
+    "approvals": "decline"
+  },
+  "started_at": "2026-09-29T17:24:00.210Z",
+  "ended_at": "2026-09-29T17:24:28.296Z",
+  "thread_id": "01a0ee31-e1eb-7bd0-9d67-5d9ba7c7f9cb",
+  "turns": [
+    {
+      "prompt": "Read README.md and summarize it in one line. Create calc.py with a function add(a, b) and test_calc.py with a unittest test for it. Run python3 -m unittest -q.",
+      "turn_id": "01a0ee31-e285-70c1-b892-dc478aafc2db",
+      "status": "completed",
+      "started_at": "2026-09-29T17:24:01.791Z",
+      "ended_at": "2026-09-29T17:24:16.459Z"
+    },
+    {
+      "prompt": "Now deliberately break add so it subtracts, rerun the tests and show the failure, then fix it and rerun.",
+      "turn_id": "01a0ee32-1bce-73b0-af2b-a8d17e47f410",
+      "status": "completed",
+      "started_at": "2026-09-29T17:24:16.460Z",
+      "ended_at": "2026-09-29T17:24:28.116Z"
+    }
+  ],
+  "outcome": "completed",
+  "error": null,
+  "codex_exit_code": 0,
+  "codex_stderr_tail": []
+}

@@ -1,0 +1,40 @@
+{
+  "recorder": {
+    "name": "agent-history-recorder",
+    "version": "0.2.0"
+  },
+  "codex": {
+    "bin": "codex",
+    "version": "codex-cli 0.155.1"
+  },
+  "settings": {
+    "cwd": "/workspace",
+    "model": null,
+    "sandbox": "workspace-write",
+    "approval_policy": "never",
+    "approvals": "decline"
+  },
+  "started_at": "2026-10-04T13:21:59.909Z",
+  "ended_at": "2026-10-04T13:25:06.434Z",
+  "thread_id": "01a10714-203f-7172-a0a4-09521747b2ad",
+  "turns": [
+    {
+      "prompt": "apply_discount in shop.py is buggy. Write unittest tests in test_shop.py that expose it, run them and watch them fail, then fix the bug and rerun until they pass.",
+      "turn_id": "01a10714-2ea5-7253-8ae5-0795e7e386a7",
+      "status": "completed",
+      "started_at": "2026-10-04T13:22:05.593Z",
+      "ended_at": "2026-10-04T13:22:37.707Z"
+    },
+    {
+      "prompt": "average crashes on an empty list. Make it return 0.0 for an empty list and add a test for it.",
+      "turn_id": "01a10715-57a7-70f3-bd89-aa9dc35a859b",
+      "status": "completed",
+      "started_at": "2026-10-04T13:23:21.601Z",
+      "ended_at": "2026-10-04T13:23:36.746Z"
+    }
+  ],
+  "outcome": "completed",
+  "error": null,
+  "codex_exit_code": 0,
+  "codex_stderr_tail": []
+}

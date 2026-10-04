@@ -1,0 +1,35 @@
+{
+  "recorder": {
+    "name": "agent-history-recorder",
+    "version": "0.2.0"
+  },
+  "codex": {
+    "bin": "codex",
+    "version": "codex-cli 0.155.1"
+  },
+  "settings": {
+    "cwd": "/workspace",
+    "model": null,
+    "sandbox": "workspace-write",
+    "approval_policy": "untrusted",
+    "approvals": "decline"
+  },
+  "started_at": "2026-09-29T17:24:47.986Z",
+  "ended_at": "2026-09-29T17:24:57.831Z",
+  "thread_id": "01a0ee32-987a-7fd2-a51d-407b93295e01",
+  "turns": [
+    {
+      "prompt": "Append the line \"world\" to notes.txt, then run: python3 -c \"print(open(\\\"notes.txt\\\").read())\"",
+      "turn_id": "01a0ee32-991c-79d1-9ebe-676f306fc5e6",
+      "status": "completed",
+      "started_at": "2026-09-29T17:24:48.534Z",
+      "ended_at": "2026-09-29T17:24:57.791Z"
+    }
+  ],
+  "outcome": "completed",
+  "error": null,
+  "codex_exit_code": 0,
+  "codex_stderr_tail": [
+    "\u001b[2m2026-09-29T17:24:55.189815Z\u001b[0m \u001b[31mERROR\u001b[0m \u001b[2mcodex_core::tools::router\u001b[0m\u001b[2m:\u001b[0m \u001b[3merror\u001b[0m\u001b[2m=\u001b[0mexec_command failed: CreateProcess { message: \"Rejected(\\\"rejected by user\\\")\" }"
+  ]
+}

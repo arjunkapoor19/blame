@@ -1,0 +1,35 @@
+{
+  "recorder": {
+    "name": "agent-history-recorder",
+    "version": "0.2.0"
+  },
+  "codex": {
+    "bin": "codex",
+    "version": "codex-cli 0.155.1"
+  },
+  "settings": {
+    "cwd": "/workspace",
+    "model": null,
+    "sandbox": "workspace-write",
+    "approval_policy": "never",
+    "approvals": "decline"
+  },
+  "started_at": "2026-09-29T17:27:38.596Z",
+  "ended_at": "2026-09-29T17:27:58.128Z",
+  "thread_id": "01a0ee35-32d4-7953-aa95-4b6c59e16bf4",
+  "turns": [
+    {
+      "prompt": "Run the shell command: sleep 90 && echo done. Then report its output.",
+      "turn_id": "01a0ee35-3375-7143-88b5-c6308303814c",
+      "status": "interrupted",
+      "started_at": "2026-09-29T17:27:39.119Z",
+      "ended_at": "2026-09-29T17:27:58.090Z"
+    }
+  ],
+  "outcome": "interrupted",
+  "error": null,
+  "codex_exit_code": 0,
+  "codex_stderr_tail": [
+    "\u001b[2m2026-09-29T17:27:58.096291Z\u001b[0m \u001b[31mERROR\u001b[0m \u001b[2mcodex_core::tools::router\u001b[0m\u001b[2m:\u001b[0m \u001b[3merror\u001b[0m\u001b[2m=\u001b[0mexec_command failed: UnknownProcessId { process_id: 97402 }"
+  ]
+}

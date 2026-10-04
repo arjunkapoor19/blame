@@ -1,6 +1,6 @@
 # Codex App Server protocol notes
 
-These notes come from `codex-schema/` and from real captures, and cover what the recorder and future normalizer rely on. Verified against **codex-cli 0.155.1**.
+These notes come from `codex-schema/` and from real captures, and cover what the recorder and the Codex adapter rely on. How these messages map to canonical events is in [`event-model.md`](event-model.md). Verified against **codex-cli 0.155.1**.
 
 ## Framing
 
@@ -28,7 +28,7 @@ Agent activity arrives as `item/started` / `item/completed` pairs keyed by `item
 - `commandExecution` has `command` (wrapped as `/bin/zsh -lc '…'`), `cwd`, `exitCode`, `aggregatedOutput`, `durationMs` and `status` (`completed`, `declined`, …). `durationMs` is often `0` for fast commands.
 - `fileChange.changes[]` holds `{path, kind: {type: add|update|…}, diff}`.
 - `turn/diff/updated` streams the turn's cumulative diff.
-- **An interrupted turn leaves dangling items**: an `item/started` with no `item/completed`. The normalizer has to close them when the turn ends.
+- **An interrupted turn leaves dangling items**: an `item/started` with no `item/completed`. The adapter closes them as `interrupted` when the turn ends.
 
 ## Streaming
 
