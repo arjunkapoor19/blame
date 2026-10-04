@@ -1,5 +1,4 @@
-"""Agent blame: which agent event wrote each line of a file, what surrounded it,
-and whether tests ran after it.
+"""Agent blame: which agent event wrote each line of a file, and what surrounded it.
 
 Recorded file changes are replayed in order into a line-origin map. ADD sets
 every line; UPDATE hunks are applied by their line numbers, so the original file
@@ -8,10 +7,6 @@ content is never needed. Lines no recorded change touched stay unattributed.
 When the file exists on disk, the replayed lines are aligned with the disk
 content, so lines edited or added outside recorded history are reported as such
 instead of being blamed on whichever agent change last touched that position.
-
-Verification is about order, not coverage: a line is "passed" when the last
-test run after it in the same session passed. We cannot tell whether those
-tests exercise the line.
 
 Known gap: edits made through shell commands (sed, `echo >>`) are not file
 changes and are invisible here.
@@ -33,9 +28,6 @@ HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 STORY_BEFORE = 12  # steps shown before the change; older ones are counted, not shown
 STORY_AFTER = 6  # steps shown after the change while waiting for a test run
 
-# Verification statuses for agent-written lines.
-PASSED, FAILED, UNTESTED = "passed", "failed", "untested"
-
 
 @dataclass
 class Line:
@@ -53,18 +45,11 @@ class Story:
 
 
 @dataclass
-class Verification:
-    status: str  # PASSED | FAILED | UNTESTED
-    check: Event | None  # the test run that decided it
-
-
-@dataclass
 class BlamedLine:
     number: int
     text: str | None
     origin: Event | None
     history: list[tuple[Event, str]]
-    verification: Verification | None = None  # None for lines no recorded agent wrote
 
     @property
     def rewrites(self) -> int:
@@ -155,8 +140,6 @@ def blame(store: Store, path: str) -> FileBlame:
     recorded = files[target]
 
     events: dict[str, Event] = {}
-    session_events: dict[str, list[Event]] = {}
-    verifications: dict[str, Verification] = {}
 
     def event(event_id: str | None) -> Event | None:
         if event_id is None:
@@ -165,18 +148,11 @@ def blame(store: Store, path: str) -> FileBlame:
             events[event_id] = store.event(event_id)
         return events[event_id]
 
-    def verify(origin: Event) -> Verification:
-        if origin.id not in verifications:
-            if origin.session_id not in session_events:
-                session_events[origin.session_id] = store.events(session_id=origin.session_id)
-            verifications[origin.id] = verification(session_events[origin.session_id], origin)
-        return verifications[origin.id]
-
     def blamed(number: int, text: str | None, line: Line | None) -> BlamedLine:
         origin = event(line.origin) if line else None
         if line is None or origin is None:
             return BlamedLine(number, text, None, [])
-        return BlamedLine(number, text, origin, [(event(e), t) for e, t in line.history], verify(origin))
+        return BlamedLine(number, text, origin, [(event(e), t) for e, t in line.history])
 
     disk = Path(target)
     if not disk.is_file():
@@ -193,17 +169,6 @@ def blame(store: Store, path: str) -> FileBlame:
                 matched[j1 + offset] = recorded[i1 + offset]
     lines = [blamed(j + 1, text, matched.get(j)) for j, text in enumerate(current)]
     return FileBlame(target, lines, on_disk=True, warnings=warnings)
-
-
-def verification(session_events: list[Event], origin: Event) -> Verification:
-    """Decided by the last test run after `origin` in the same session."""
-    latest = Verification(UNTESTED, None)
-    for event in session_events:
-        if event.seq > origin.seq and event.kind == model.COMMAND:
-            result = commands.verdict(event.payload, event.status)
-            if result:
-                latest = Verification(result, event)
-    return latest
 
 
 def story(store: Store, origin: Event) -> Story:

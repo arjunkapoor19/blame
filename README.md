@@ -9,7 +9,6 @@ $ ah blame shop.py:6
 shop.py:6
         return price * (1 - percent / 100)
 
-✓ tests passed after this change  (python3 -m unittest -v → 4 tests passed)
 written by codex · session 20261004T132159Z-39de3d · turn 1 · 2026-10-04 13:22:33 UTC
 
 You asked: "apply_discount in shop.py is buggy. Write unittest tests in test_shop.py that expose it, run them and watch them fail, then fix the bug and rerun until they pass."
@@ -24,8 +23,6 @@ You asked: "apply_discount in shop.py is buggy. Write unittest tests in test_sho
 ▶ 13:22:33  edit     ~shop.py   ← wrote this line
   13:22:34  test     ✓ python3 -m unittest -v  → 3 tests passed
 ```
-
-`ah blame shop.py` marks every agent-written line ✓ (tests passed after it), ✗ (tests failing after it), ○ (never tested) or ⚠ (rewritten 2+ times), so you can see which lines the agent wrote but never checked.
 
 ## Layout
 
@@ -49,7 +46,7 @@ uv sync
 uv run ah ingest captures/<session-dir>...    # normalize captures into the database
 uv run ah log                                 # list sessions
 uv run ah log <session>                       # one session's timeline (any unique part of the id)
-uv run ah blame path/to/file.py               # which agent event wrote each line, and was it tested
+uv run ah blame path/to/file.py               # which agent event wrote each line
 uv run ah blame path/to/file.py:42            # one line: the story of the turn that wrote it
 uv run pytest                                 # tests
 ```

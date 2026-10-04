@@ -4,7 +4,7 @@ import pytest
 
 from agent_history import model
 from agent_history.adapters.codex import normalize
-from agent_history.blame import FAILED, PASSED, UNTESTED, Line, apply_hunks, blame, replay, story
+from agent_history.blame import Line, apply_hunks, blame, replay, story
 from agent_history.model import Event, FileChange, NormalizedSession, Session, Thread, Turn
 from agent_history.store import Store
 
@@ -89,7 +89,6 @@ def test_blame_break_fix_fixture(tmp_path):
     assert [text for _, text in line.history] == ["    return a + b", "    return a - b", "    return a + b"]
 
     assert line.rewrites == 2
-    assert line.verification.status == PASSED
 
     with pytest.raises(LookupError):
         blame(store, "/workspace/nope.py")
@@ -147,40 +146,3 @@ def test_story_tells_the_whole_turn(tmp_path):
     assert after[-1].payload["phase"] == "final"
     assert all(e.turn_id == line.origin.turn_id for e in told.steps)
     assert (model.TOKEN_USAGE, None) not in steps
-
-
-def test_verification_on_real_session(tmp_path):
-    store = Store(tmp_path / "h.db")
-    store.ingest(normalize(SHOP))
-    result = blame(store, "/workspace/shop.py")
-    written = {l.number: l.verification for l in result.lines if l.origin}
-    assert sorted(written) == [6, 10, 11]
-    assert all(v.status == PASSED for v in written.values())
-    # The deciding run is the session's last test run, in turn 2.
-    assert written[6].check.payload["output"].rstrip().endswith("OK")
-    assert store.turn(written[6].check.turn_id)["seq"] == 2
-
-
-def _session(path: Path, commands: list[tuple[str, int]]) -> NormalizedSession:
-    """One turn: write `path`, then run each (command, exit code)."""
-    normalized = _session_writing(path, "x = 1\n")
-    for seq, (command, exit_code) in enumerate(commands, start=2):
-        normalized.events.append(Event(
-            f"s1:{seq}", "s1", "t", "u", seq, model.COMMAND, "completed" if exit_code == 0 else "failed",
-            seq, seq, payload={"command": command, "exit_code": exit_code, "output": ""}))
-    return normalized
-
-
-@pytest.mark.parametrize("commands, status", [
-    ([], UNTESTED),
-    ([("ls", 0), ("python3 build.py", 1)], UNTESTED),  # not test runs
-    ([("pytest -q", 127)], UNTESTED),  # the runner never ran
-    ([("pytest -q", 0)], PASSED),
-    ([("pytest -q", 0), ("pytest -q", 1)], FAILED),  # the latest run decides
-    ([("pytest -q", 1), ("cd app && npm test", 0)], PASSED),
-])
-def test_verification_statuses(tmp_path, commands, status):
-    store = Store(tmp_path / "h.db")
-    store.ingest(_session(tmp_path / "f.py", commands))
-    [line] = blame(store, str(tmp_path / "f.py")).lines
-    assert line.verification.status == status

@@ -53,12 +53,10 @@ def test_cli_end_to_end(tmp_path, capsys):
 
     assert main(["--db", db, "blame", "/workspace/calc.py"]) == 0
     out = capsys.readouterr().out
-    assert "✓⚠  2      return a + b" in out
-    assert "2 of 2 lines written by a recorded agent: 2 ✓ tests passed after" in out
+    assert "cb44c2 t2   17:24:24  2      return a + b" in out
 
     assert main(["--db", db, "blame", "/workspace/calc.py:2"]) == 0
     out = capsys.readouterr().out
-    assert "✓ tests passed after this change" in out
     assert "turn 2" in out
     assert "▶ 17:24:24  edit     ~calc.py   ← wrote this line" in out
     assert "test     ✗ python3 -m unittest -q  → 1 test, 1 failed" in out

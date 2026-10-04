@@ -80,17 +80,4 @@ When the file exists on disk, the replayed lines are aligned with its current co
 - **Summaries** come from the end of the output, because agents may truncate the start: unittest/pytest/jest counts, the last assertion or exception line, `command not found` for exit 127, or the last output line as a fallback.
 - **Read-only commands** (every action is a read, list or search) are shown as `read shop.py, list files`.
 
-### Verification status
-
-Every agent-written line gets one status, decided by the **last test run after the line was written, in the same session**:
-
-| mark | status | meaning |
-|---|---|---|
-| ✓ | `passed` | the last test run after the change passed |
-| ✗ | `failed` | the last test run after the change failed |
-| ○ | `untested` | no test run after the change (runs that never started, such as exit 127, don't count) |
-| ⚠ | | the line was rewritten 2+ times (churn), shown alongside the status |
-
-This is about order, not coverage: ✓ means tests ran afterwards and passed, not that they exercise the line. The whole-file view ends with a count of each status, so the lines that most need human review (✗, ○ and ⚠) stand out.
-
 **Known gap:** edits made through shell commands (`sed -i`, `echo >> file`) aren't `fileChange` items, so blame can't see them yet. `turn/diff/updated` is the planned source for recovering them.

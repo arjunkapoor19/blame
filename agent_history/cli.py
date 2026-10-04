@@ -5,21 +5,17 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_history import model
 from agent_history.adapters import codex
-from agent_history.blame import FAILED, PASSED, UNTESTED, BlamedLine, FileBlame, blame, story
+from agent_history.blame import BlamedLine, FileBlame, blame, story
 from agent_history.commands import is_test, read_only_label, summarize
 from agent_history.model import Event
 from agent_history.store import Store, default_db_path
 
 COMMAND_MARKS = {"completed": "✓", "failed": "✗", "declined": "⊘", "interrupted": "…", "incomplete": "…"}
-STATUS_MARKS = {PASSED: "✓", FAILED: "✗", UNTESTED: "○"}
-STATUS_TEXT = {PASSED: "tests passed after this change", FAILED: "tests were failing after this change",
-               UNTESTED: "no tests ran after this change"}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -108,20 +104,8 @@ def _blame_file(store: Store, result: FileBlame) -> int:
         print("(file not on disk; showing content reconstructed from recorded changes)", file=sys.stderr)
     width = len(str(len(result.lines)))
     for line in result.lines:
-        if line.origin is None:
-            who = " " * 24
-        else:
-            churn = "⚠" if line.rewrites >= 2 else " "
-            who = f"{_who(store, line.origin)} {STATUS_MARKS[line.verification.status]}{churn}"
-        print(f"{who}  {line.number:>{width}}  {line.text if line.text is not None else '…'}")
-
-    written = [line for line in result.lines if line.origin is not None]
-    statuses = Counter(line.verification.status for line in written)
-    churned = sum(1 for line in written if line.rewrites >= 2)
-    print(f"\n{len(written)} of {len(result.lines)} lines written by a recorded agent: "
-          f"{statuses[PASSED]} ✓ tests passed after · {statuses[FAILED]} ✗ tests failed after · "
-          f"{statuses[UNTESTED]} ○ no tests after · {churned} ⚠ rewritten 2+ times")
-    print("(✓ means tests ran after the line was written and passed, not that they cover it.)")
+        who = _who(store, line.origin) if line.origin else ""
+        print(f"{who:<20}  {line.number:>{width}}  {line.text if line.text is not None else '…'}")
     return 0
 
 
@@ -132,15 +116,10 @@ def _blame_line(store: Store, path: str, line: BlamedLine) -> int:
         print("Not written by a recorded agent: the line is pre-existing or was edited outside recorded history.")
         return 0
 
-    origin, check = line.origin, line.verification.check
+    origin = line.origin
     session = store.find_session(origin.session_id)
     cwd = session["cwd"] if session else None
     turn = store.turn(origin.turn_id) if origin.turn_id else None
-    evidence = ""
-    if check is not None:
-        summary = summarize(check.payload, check.status)
-        evidence = f"  ({_first_line(check.payload.get('command'), 50)}{' → ' + summary if summary else ''})"
-    print(f"{STATUS_MARKS[line.verification.status]} {STATUS_TEXT[line.verification.status]}{evidence}")
     print(f"written by {session['agent'] if session else 'an agent'} · session {origin.session_id} · "
           f"turn {turn['seq'] if turn else '?'} · {_time(origin.started_at, date=True)} UTC\n")
 
@@ -160,7 +139,7 @@ def _blame_line(store: Store, path: str, line: BlamedLine) -> int:
         print(f"\nLine history (oldest first; rewritten {line.rewrites} time{'s' if line.rewrites > 1 else ''})")
         for event, text in line.history:
             print(f"  {_who(store, event) if event else '?':<22}  {text}")
-    print("\nSteps are shown in order; order is not proof of cause, and passing tests may not cover this line.")
+    print("\nSteps are shown in order; order is not proof of cause.")
     return 0
 
 
