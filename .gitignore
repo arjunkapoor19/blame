@@ -1,0 +1,13 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# recorded sessions can contain source code, prompts, and command output
+captures/
+
+node_modules/
+dist/
+__pycache__/
+*.pyc
+.DS_Store
