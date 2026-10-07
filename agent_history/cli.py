@@ -10,17 +10,20 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-from agent_history import model, sources
-from agent_history.blame import HUNK_HEADER, BlamedLine, FileBlame, blame, story
+from agent_history import hooks, model, sources
+from agent_history import setup as agent_setup
+from agent_history.blame import HUNK_HEADER, Author, BlamedLine, FileBlame, blame, observed_file_changes, story
 from agent_history.commands import is_test, read_only_label, summarize
 from agent_history.model import Event
-from agent_history.store import Store, default_db_path
+from agent_history.store import DEFAULT_DB, Store, default_db_path
 
 DIFF_PREVIEW = 12  # diff lines shown per file for edits other than the one that wrote the line
 ORIGIN_WINDOW = 8  # diff lines shown either side of the blamed line when its edit is large
 DETAIL = " " * 21  # indents an event's details under its text in a story
 WIDTH = 100
 DIFF_COLORS = {"+": "32", "-": "31"}
+AUTHOR_WIDTH = 7
+AGENT_COLORS = ("35", "36", "34", "95", "96")  # per agent name, stable across runs
 
 COMMAND_MARKS = {"completed": "✓", "failed": "✗", "declined": "⊘", "interrupted": "…", "incomplete": "…"}
 
@@ -38,8 +41,24 @@ def main(argv: list[str] | None = None) -> int:
     log.add_argument("session", nargs="?", help="Session id (or a unique part of it)")
     blame_cmd = commands.add_parser("blame", help="Show which agent event wrote each line of a file.")
     blame_cmd.add_argument("target", help="PATH or PATH:LINE")
+    setup_cmd = commands.add_parser("setup", help="Install hooks so ah sees every change agents make, "
+                                                  "including through the shell.")
+    setup_cmd.add_argument("agents", nargs="*", help=f"Agents to set up: {', '.join(agent_setup.AGENTS)} "
+                                                      "(default: all)")
+    setup_cmd.add_argument("--remove", action="store_true", help="Remove ah's hooks instead.")
+    hook_cmd = commands.add_parser("hook", help="(Run by agents.) Observe the workspace around a tool call.")
+    hook_cmd.add_argument("agent")
+    hook_cmd.add_argument("event", choices=hooks.EVENTS)
     args = parser.parse_args(argv)
 
+    if args.command == "hook":
+        return hooks.run(args.agent, args.event, sys.stdin.read(), args.db)
+    if args.command == "setup":
+        try:
+            return cmd_setup(args.agents or list(agent_setup.AGENTS), args.remove, args.db)
+        except (LookupError, ValueError) as error:
+            print(f"ah: {error.args[0]}", file=sys.stderr)
+            return 1
     store = Store(args.db)
     try:
         if args.command == "ingest":
@@ -53,6 +72,33 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     finally:
         store.close()
+
+
+def cmd_setup(agents: list[str], remove: bool, db: str) -> int:
+    unknown = [name for name in agents if name not in agent_setup.AGENTS]
+    if unknown:
+        raise LookupError(f"unknown agent {', '.join(unknown)} (choose from {', '.join(agent_setup.AGENTS)})")
+    ah = agent_setup.ah_executable()
+    custom_db = db if Path(db) != DEFAULT_DB else None
+    for name in agents:
+        agent = agent_setup.AGENTS[name]
+        if remove:
+            removed = agent_setup.remove(agent)
+            print(f"{name}: {'removed ah hooks from' if removed else 'no ah hooks in'} {agent.settings()}")
+            continue
+        print(f"{name}: added hooks to {agent.settings()}")
+        for line in agent_setup.install(agent, ah, custom_db):
+            print(f"  {line}")
+    if not remove:
+        print(f"\nHooks run {ah}")
+        if ".venv" in Path(ah).parts:
+            print("  That's inside a project virtualenv; for a stable, fast `ah`, run `uv tool install --editable .`"
+                  " and then `ah setup` again.")
+        for name in agents:
+            if agent_setup.AGENTS[name].note:
+                print(agent_setup.AGENTS[name].note)
+        print("Undo with `ah setup --remove`. A backup of each settings file was kept as *.agent-history.bak.")
+    return 0
 
 
 def cmd_ingest(store: Store, paths: list[str]) -> int:
@@ -128,25 +174,57 @@ def _blame_file(store: Store, result: FileBlame) -> int:
     if not result.on_disk:
         print("(file not on disk; showing content reconstructed from recorded changes)", file=sys.stderr)
     width = len(str(len(result.lines)))
+    print(_color("2", f"{'author':<{AUTHOR_WIDTH}} {'session turn time':<21}  {'#':>{width}}  code"))
     for line in result.lines:
-        who = _who(store, line.origin) if line.origin else ""
-        print(f"{who:<20}  {line.number:>{width}}  {line.text if line.text is not None else '…'}")
+        name = _author_name(line.author)
+        who = _who(store, line.author) if line.author and line.author.kind != "baseline" else ""
+        flag = "≈" if line.author and line.author.concurrent else " "
+        text = line.text if line.text is not None else "…"
+        print(f"{_color(_author_color(name), f'{name:<{AUTHOR_WIDTH}}')} {who:<21}{flag} {line.number:>{width}}  {text}")
+    counts = Counter(_author_name(line.author) or "untracked" for line in result.lines)
+    labels = {"·": "pre-existing", "you": "outside any agent"}
+    print("\n" + " · ".join(f"{count} {labels.get(name, name)}" for name, count in counts.most_common()))
+    if any(line.author and line.author.concurrent for line in result.lines):
+        print("≈ written while another tool call was running in the same workspace: it may have come from either")
     return 0
 
 
 def _blame_line(store: Store, path: str, line: BlamedLine) -> int:
     print(f"{path}:{line.number}")
     print(f"    {line.text if line.text is not None else '… (content not recorded)'}\n")
-    if line.origin is None:
-        print("Not written by a recorded agent: the line is pre-existing or was edited outside recorded history.")
+    author = line.author
+    if author is None:
+        print("Not attributed: the line predates what ah has recorded or observed, or changed while nothing "
+              "was observing.\nRun `ah setup` so ah observes every change from now on.")
+        return 0
+    if author.kind == "baseline":
+        print(f"Already here when ah started observing this workspace ({_time(author.observation['started_at'], True)})."
+              "\nNo agent has changed it since.")
+        return 0
+    if author.concurrent:
+        print("≈ Another tool call was running in this workspace at the same time; the line may be from either.\n")
+    if author.kind == "outside":
+        obs = author.observation
+        print(f"Edited outside any agent (by you or another program) between {_time(obs['started_at'], True)} "
+              f"and {_time(obs['ended_at'], True)}.\n")
+        _print_observed(store, obs["id"], path, line.born)
+        return 0
+    if line.origin is None:  # an observed tool call whose transcript isn't in the database yet
+        obs = author.observation
+        print(f"written by {author.agent} · session {obs['agent_session_id']} · {obs['tool_name']} · "
+              f"{_time(obs['ended_at'], True)}\n(this session's transcript hasn't been synced yet)\n")
+        if obs["command"]:
+            print(f"  {_first_line(obs['command'], WIDTH)}")
+        _print_observed(store, obs["id"], path, line.born)
         return 0
 
     origin = line.origin
     session = store.find_session(origin.session_id)
     cwd = session["cwd"] if session else None
     turn = store.turn(origin.turn_id) if origin.turn_id else None
-    print(f"written by {session['agent'] if session else 'an agent'} · session {origin.session_id} · "
-          f"turn {turn['seq'] if turn else '?'} · {_time(origin.started_at, date=True)}\n")
+    seen = " · observed by ah" if author.observation else ""
+    print(f"written by {author.agent or 'an agent'} · session {origin.session_id} · "
+          f"turn {turn['seq'] if turn else '?'} · {_time(origin.started_at, date=True)}{seen}\n")
 
     told = story(store, origin)
     if told.prompt:
@@ -166,10 +244,19 @@ def _blame_line(store: Store, path: str, line: BlamedLine) -> int:
 
     if line.rewrites:
         print(f"\nLine history (oldest first; rewritten {line.rewrites} time{'s' if line.rewrites > 1 else ''})")
-        for event, text in line.history:
-            print(f"  {_who(store, event) if event else '?':<22}  {text}")
+        for who, text in line.history:
+            name = _author_name(who) or "?"
+            print(f"  {_color(_author_color(name), f'{name:<{AUTHOR_WIDTH}}')} "
+                  f"{_who(store, who) if who else '':<21}  {text}")
     print("\nSteps are shown in order; order is not proof of cause.")
     return 0
+
+
+def _print_observed(store: Store, observation_id: int, path: str, born: int | None) -> None:
+    for change in observed_file_changes(store, observation_id):
+        if change.path == path:
+            for detail in _diff_lines(change, None, born):
+                print("  " + detail)
 
 
 def _story_lines(event: Event, cwd: str | None, blamed_path: str, blamed_at: int | None) -> list[str]:
@@ -184,12 +271,12 @@ def _story_lines(event: Event, cwd: str | None, blamed_path: str, blamed_at: int
         wrapped = _wrap(event.payload.get("text") or "", WIDTH - len(DETAIL))
         return [f"{label:<8} {wrapped[0] if wrapped else ''}"] + wrapped[1:]
     summary = describe(event, cwd)
-    if summary is None or event.kind != model.FILE_CHANGE:
+    if summary is None or not event.file_changes:
         return [summary] if summary else []
     details: list[str] = []
     for change in event.file_changes:
-        if len(event.file_changes) > 1:
-            details.append(_relative(change.path, cwd) + ":")
+        if len(event.file_changes) > 1 or event.kind != model.FILE_CHANGE:  # e.g. what a command changed
+            details.append(("changed " if event.kind != model.FILE_CHANGE else "") + _relative(change.path, cwd) + ":")
         origin = blamed_at is not None and change.path == blamed_path
         details += _diff_lines(change, None if origin else DIFF_PREVIEW, blamed_at if origin else None)
     return [summary] + details
@@ -250,10 +337,33 @@ def _wrap(text: str, width: int) -> list[str]:
     return lines
 
 
-def _who(store: Store, event: Event) -> str:
-    """Short `session turn time` label, e.g. `39de3d t1   13:22:33`."""
-    turn = store.turn(event.turn_id) if event.turn_id else None
-    return f"{event.session_id[-6:]:<6} t{turn['seq'] if turn else '?':<3} {_time(event.started_at)}"
+def _who(store: Store, author: Author) -> str:
+    """Short `session turn time` label, e.g. `39de3d  t1   13:22:33`."""
+    event = author.event
+    if event is not None:
+        turn = store.turn(event.turn_id) if event.turn_id else None
+        return f"{event.session_id[-6:]:<6}  t{turn['seq'] if turn else '?':<3} {_time(event.started_at)}"
+    obs = author.observation or {}
+    return f"{(obs.get('agent_session_id') or '')[-6:]:<6}  {'':<4} {_time(obs.get('ended_at'))}"
+
+
+def _author_name(author: Author | None) -> str:
+    """The agent's name up to its first `-`, `you` for edits outside any agent, `·` for pre-existing lines."""
+    if author is None:
+        return ""
+    if author.kind == "outside":
+        return "you"
+    if author.kind == "baseline":
+        return "·"
+    return (author.agent or "agent").split("-")[0][:AUTHOR_WIDTH]
+
+
+def _author_color(name: str) -> str:
+    if name in ("", "·"):
+        return "2"
+    if name == "you":
+        return "33"
+    return AGENT_COLORS[sum(map(ord, name)) % len(AGENT_COLORS)]
 
 
 def describe(event: Event, cwd: str | None = None) -> str | None:

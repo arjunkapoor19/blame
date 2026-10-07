@@ -53,7 +53,8 @@ def test_cli_end_to_end(tmp_path, capsys):
 
     assert main(["--db", db, "blame", "/workspace/calc.py"]) == 0
     out = capsys.readouterr().out
-    assert "cb44c2 t2   17:24:24  2      return a + b" in out
+    assert out.splitlines()[0].split() == ["author", "session", "turn", "time", "#", "code"]
+    assert "codex   cb44c2  t2   17:24:24  2      return a + b" in out
 
     assert main(["--db", db, "blame", "/workspace/calc.py:2"]) == 0
     out = capsys.readouterr().out

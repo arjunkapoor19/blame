@@ -77,6 +77,7 @@ class FileChange:
     kind: str  # ADD | UPDATE | DELETE | MOVE
     diff: str | None  # full content for ADD, unified hunks for UPDATE/MOVE
     move_path: str | None = None  # destination for MOVE
+    observed: bool = False  # seen in the workspace by ah, rather than reported by the agent
 
 
 @dataclass

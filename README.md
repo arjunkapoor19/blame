@@ -57,15 +57,20 @@ captures/                    one directory per recorded session (gitignored; may
 Requires [uv](https://docs.astral.sh/uv/). There are no runtime dependencies beyond the Python standard library.
 
 ```sh
-uv sync
+uv tool install --editable .                  # puts `ah` on your PATH
+ah setup                                      # once: let ah observe Claude Code and Codex tool calls
 codex                                         # or `claude`: use your agent as usual, then:
-uv run ah blame path/to/file.py:42            # why does line 42 exist? (picks up new sessions automatically)
+ah blame path/to/file.py:42                   # why does line 42 exist? (picks up new sessions automatically)
 ```
+
+`ah setup` adds small hooks to your user-level Claude Code and Codex settings (`~/.claude/settings.json`, `~/.codex/hooks.json`). Before and after every tool call that can change files, they snapshot the project, so `ah` sees exactly what each call changed, including edits made through the shell (`printf >> f`, `sed -i`, scripts), which agents don't report. Edits made between tool calls are labeled as made outside any agent (`you`). Each hook takes about 0.1 s. Your settings are backed up as `*.agent-history.bak`, and `ah setup --remove` takes the hooks out again. Codex asks you to trust new hooks once. Without `ah setup`, `ah` still works from agents' logs, but can't see shell edits.
+
+Snapshots keep copies of text files up to 1 MB under `~/.agent-history/objects`, next to the database. They never leave your machine.
 
 ```sh
 uv run ah log                                 # list sessions
 uv run ah log <session>                       # one session's timeline (any unique part of the id)
-uv run ah blame path/to/file.py               # which agent event wrote each line
+uv run ah blame path/to/file.py               # who wrote each line: which agent (or you), session, turn
 uv run ah blame path/to/file.py:42            # one line: the story of the turn that wrote it
 uv run ah ingest                              # sync agent logs explicitly and list what was loaded
 uv run ah ingest captures/<session-dir>       # load a recorder capture (wins over the log of the same session)
@@ -74,7 +79,7 @@ uv run pytest                                 # tests
 
 `ah log` and `ah blame` first sync your agents' session logs (Codex: `$CODEX_HOME/sessions`, default `~/.codex/sessions`; Claude Code: `$CLAUDE_CONFIG_DIR/projects`, default `~/.claude/projects`), reading only new or changed files. History survives your agent's own cleanup: Claude Code, for example, deletes transcripts after about 30 days, but synced sessions stay in `ah`. The database defaults to `~/.agent-history/history.db`. Override it with `--db` or `$AGENT_HISTORY_DB`. Each agent run is stored once, even if it was both logged and captured.
 
-Blame aligns recorded history with the file on disk, so lines edited by hand afterwards aren't blamed on the agent. It can't yet see edits the agent made through shell commands (`sed -i`, `echo >>`); see `docs/event-model.md`.
+Blame aligns everything with the file on disk, so a line nothing recorded or observed is reported as untracked, never misattributed. See `docs/event-model.md` for how it all fits together.
 
 ## Recording a session (optional)
 

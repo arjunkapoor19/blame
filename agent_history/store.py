@@ -72,6 +72,44 @@ CREATE TABLE IF NOT EXISTS synced_files (
     mtime_ns INTEGER NOT NULL,
     size     INTEGER NOT NULL
 );
+-- Observed workspaces: an index of their files (like git's) and what changed between snapshots.
+CREATE TABLE IF NOT EXISTS workspaces (
+    root          TEXT PRIMARY KEY,
+    first_seen    INTEGER NOT NULL,
+    last_snapshot INTEGER NOT NULL  -- nanoseconds
+);
+CREATE TABLE IF NOT EXISTS ws_files (
+    root     TEXT NOT NULL,
+    path     TEXT NOT NULL,  -- relative to root
+    mtime_ns INTEGER NOT NULL,
+    size     INTEGER NOT NULL,
+    blob     TEXT NOT NULL,
+    PRIMARY KEY (root, path)
+);
+CREATE TABLE IF NOT EXISTS observations (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    root             TEXT NOT NULL,
+    actor            TEXT NOT NULL,  -- agent | outside | baseline
+    agent            TEXT,
+    agent_session_id TEXT,
+    tool_call_id     TEXT,
+    tool_name        TEXT,
+    command          TEXT,
+    started_at       INTEGER,
+    ended_at         INTEGER,  -- NULL while the tool call is running
+    concurrent       INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS observations_by_call ON observations(agent_session_id, tool_call_id);
+CREATE TABLE IF NOT EXISTS observed_changes (
+    observation_id INTEGER NOT NULL REFERENCES observations(id) ON DELETE CASCADE,
+    idx            INTEGER NOT NULL,
+    path           TEXT NOT NULL,  -- absolute
+    kind           TEXT NOT NULL,
+    before_blob    TEXT,
+    after_blob     TEXT,
+    PRIMARY KEY (observation_id, idx)
+);
+CREATE INDEX IF NOT EXISTS observed_changes_by_path ON observed_changes(path);
 """
 
 
@@ -83,7 +121,8 @@ class Store:
     def __init__(self, path: str | Path) -> None:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(path)
+        self.objects_dir = path.parent / "objects"  # file contents seen in observed workspaces
+        self.db = sqlite3.connect(path, timeout=10)  # hooks from parallel tool calls share the database
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")
         self.db.executescript(SCHEMA)
@@ -201,6 +240,109 @@ class Store:
     def forget_synced(self) -> None:
         with self.db:
             self.db.execute("DELETE FROM synced_files")
+
+    # -- observed workspaces ---------------------------------------------------
+
+    def ws_index(self, root: str) -> tuple[dict[str, tuple[int, int, str]], int | None]:
+        """The stored index of `root` (path -> (mtime_ns, size, blob)) and when it was taken."""
+        row = self.db.execute("SELECT last_snapshot FROM workspaces WHERE root = ?", (root,)).fetchone()
+        if row is None:
+            return {}, None
+        entries = self.db.execute("SELECT path, mtime_ns, size, blob FROM ws_files WHERE root = ?", (root,))
+        return {r["path"]: (r["mtime_ns"], r["size"], r["blob"]) for r in entries}, row["last_snapshot"]
+
+    def ws_save(self, root: str, previous: dict, current: dict, now_ns: int) -> None:
+        """Write only what changed between two indexes of `root`."""
+        with self.db:
+            self.db.execute("INSERT INTO workspaces VALUES (?, ?, ?) ON CONFLICT(root) DO UPDATE SET "
+                            "last_snapshot = excluded.last_snapshot", (root, now_ns // 1_000_000, now_ns))
+            self.db.executemany("DELETE FROM ws_files WHERE root = ? AND path = ?",
+                                [(root, p) for p in previous if p not in current])
+            self.db.executemany("INSERT OR REPLACE INTO ws_files VALUES (?, ?, ?, ?, ?)",
+                                [(root, p, *entry) for p, entry in current.items() if previous.get(p) != entry])
+
+    def baseline(self, path: str) -> sqlite3.Row | None:
+        """What an absolute path held when observation of its workspace began, if it existed then."""
+        return self.db.execute(
+            "SELECT c.*, o.started_at FROM observed_changes c JOIN observations o ON o.id = c.observation_id "
+            "WHERE c.path = ? AND o.actor = 'baseline' ORDER BY o.started_at LIMIT 1", (path,)).fetchone()
+
+    def observation(self, observation_id: int) -> sqlite3.Row | None:
+        return self.db.execute("SELECT * FROM observations WHERE id = ?", (observation_id,)).fetchone()
+
+    def linked_event_id(self, agent_session_id: str | None, tool_call_id: str | None) -> str | None:
+        """The event for an observed tool call: same session (or thread), same native tool call id."""
+        if not agent_session_id or not tool_call_id:
+            return None
+        row = self.db.execute(
+            "SELECT e.id FROM events e WHERE json_extract(e.payload, '$.source_id') = ? "
+            "AND (e.session_id = ? OR e.thread_id = ?) LIMIT 1",
+            (tool_call_id, agent_session_id, agent_session_id)).fetchone()
+        return row["id"] if row else None
+
+    def observation_for(self, event: Event) -> sqlite3.Row | None:
+        """The observation of an event's tool call, if its workspace was observed."""
+        source_id = event.payload.get("source_id")
+        if not source_id:
+            return None
+        return self.db.execute(
+            "SELECT * FROM observations WHERE tool_call_id = ? AND agent_session_id IN (?, ?) AND actor = 'agent' "
+            "ORDER BY id DESC LIMIT 1", (source_id, event.session_id, event.thread_id)).fetchone()
+
+    def changes_of(self, observation_id: int) -> list[sqlite3.Row]:
+        return self.db.execute("SELECT * FROM observed_changes WHERE observation_id = ? ORDER BY idx",
+                               (observation_id,)).fetchall()
+
+    def add_observation(self, root: str, actor: str, started_at: int, ended_at: int | None = None,
+                        changes: list | None = None, **call) -> int:
+        with self.db:
+            cursor = self.db.execute(
+                "INSERT INTO observations (root, actor, agent, agent_session_id, tool_call_id, tool_name, command, "
+                "started_at, ended_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (root, actor, call.get("agent"), call.get("agent_session_id"), call.get("tool_call_id"),
+                 call.get("tool_name"), call.get("command"), started_at, ended_at))
+            self._add_changes(cursor.lastrowid, changes or [])
+        return cursor.lastrowid
+
+    def last_observed(self, root: str) -> int | None:
+        """When anything in `root` was last observed, in milliseconds (None if never)."""
+        row = self.db.execute("SELECT MAX(COALESCE(ended_at, started_at)) AS at FROM observations WHERE root = ?",
+                              (root,)).fetchone()
+        return row["at"]
+
+    def add_changes(self, observation_id: int, changes: list) -> None:
+        with self.db:
+            self._add_changes(observation_id, changes)
+
+    def close_observation(self, observation_id: int, ended_at: int, changes: list) -> None:
+        with self.db:
+            self.db.execute("UPDATE observations SET ended_at = ? WHERE id = ?", (ended_at, observation_id))
+            self._add_changes(observation_id, changes)
+
+    def open_observations(self, root: str) -> list[sqlite3.Row]:
+        return self.db.execute("SELECT * FROM observations WHERE root = ? AND actor = 'agent' AND ended_at IS NULL "
+                               "ORDER BY started_at", (root,)).fetchall()
+
+    def mark_concurrent(self, observation_ids: list[int]) -> None:
+        with self.db:
+            self.db.executemany("UPDATE observations SET concurrent = 1 WHERE id = ?", [(i,) for i in observation_ids])
+
+    def observed_changes(self, paths: list[str]) -> list[sqlite3.Row]:
+        """Observed changes to these absolute paths (by agents or outside them), oldest first."""
+        marks = ",".join("?" * len(paths))
+        return self.db.execute(f"""
+            SELECT c.*, o.actor, o.agent, o.agent_session_id, o.tool_call_id, o.started_at, o.ended_at
+            FROM observed_changes c JOIN observations o ON o.id = c.observation_id
+            WHERE o.actor != 'baseline' AND o.ended_at IS NOT NULL AND c.path IN ({marks})
+            ORDER BY o.ended_at, o.id, c.idx
+        """, paths).fetchall()
+
+    def _add_changes(self, observation_id: int, changes: list) -> None:
+        start = self.db.execute("SELECT COUNT(*) FROM observed_changes WHERE observation_id = ?",
+                                (observation_id,)).fetchone()[0]
+        self.db.executemany("INSERT INTO observed_changes VALUES (?,?,?,?,?,?)",
+                            [(observation_id, start + i, c.path, c.kind, c.before, c.after)
+                             for i, c in enumerate(changes)])
 
     def counts(self) -> dict[str, int]:
         tables = ("sessions", "threads", "turns", "events", "file_changes")

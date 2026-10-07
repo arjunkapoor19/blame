@@ -120,13 +120,44 @@ Claude Code deletes transcripts after about 30 days by default. Sessions already
 
 Not yet read: sub-agent transcripts under `<session-id>/subagents/`.
 
+## Observed changes
+
+Agents only report changes they make with their edit tools, so a shell command's side effects (`printf >> f`, `sed -i`, a script that writes files) are invisible in their logs. `ah setup` therefore installs hooks (`agent_history/setup.py`) that run `ah hook <agent> pre|post|stop` (`agent_history/hooks.py`) around each tool call that can change files. Each run snapshots the workspace (`agent_history/workspace.py`) and records the difference as an **observation**:
+
+- **Snapshots work like git's index.** The workspace is the git top level of the hook's `cwd` (or the directory itself); its files are git's view (tracked and untracked, minus ignored). Every file is `stat`ed, and only files whose size or modification time changed (or that changed within 2 s of the last snapshot) are read. Contents go into a content-addressed store, `objects/` next to the database: text files up to 1 MB. Binary and larger files are tracked by hash only.
+- **The first snapshot of a workspace is a `baseline`:** what it held before anything was observed.
+- **`pre` records changes since the last snapshot as `outside`:** made by a person or another program, not an agent. Then an `agent` observation opens for the call. If another call is still running, those changes go to it instead.
+- **`post` records changes since `pre` as that call's,** and closes it. A `post` without a `pre` still records.
+- **`stop`** (agent turn ended, or a new prompt) closes calls that never got their `post`, such as interrupted ones.
+- **Overlapping observations in one workspace** (parallel tool calls, two agents at once) are marked `concurrent`.
+- **Hooks never disturb the agent.** They're serialized with a file lock, always exit 0, never write to stdout, and log failures to `hooks.log` next to the database.
+
+Hook input is the same for both agents (`session_id`, `tool_use_id`, `tool_name`, `tool_input`, `cwd`, …; Codex adds `turn_id`); parsers live in `hooks.PARSERS`. Verified with real hook calls:
+- **Claude Code:** `tool_use_id` is the transcript's `tool_use.id` (`toolu_…`), and `session_id` is its `sessionId`.
+- **Codex:** `tool_use_id` is the item id in its session log (`exec-…`), and `session_id` is the thread id.
+- **Shell tool name:** both agents call it `Bash`.
+
+An `agent` observation links to the event whose `payload.source_id` equals the hook's `tool_use_id`, in the same session or thread.
+
 ## Blame
 
 `ah blame` replays every non-declined `FileChange` in time order into a per-file line-origin map. `add` attributes every line. `update` hunks are applied by their line numbers, so the file's original content is not needed, and lines no recorded change touched stay unattributed. A replaced line keeps the history of the line it replaced, so `ah blame file:N` can show a line being written, broken and fixed.
 
 Each line also remembers its line number right after the edit that wrote it, so a story marks exactly that line in the edit's diff (not just the first line with the same text). For a large edit, such as creating a file, the diff is shown as a window around the line.
 
-When the file exists on disk, the replayed lines are aligned with its current content (`difflib`). Lines a human added or edited after the agent finished are reported as not written by a recorded agent, instead of being blamed on whatever agent change last touched that position.
+Observed changes join the same timeline:
+
+- **Aligning instead of patching.** For an observed change, the replay is aligned (`difflib`) to the file's actual content after the change. Lines that stayed keep their author; new or changed lines belong to that observation, and carry the history of the lines they replaced. Because the content is ground truth, the replay corrects itself.
+- **No double counting.** An observed tool call replaces the same call's recorded changes for that file.
+- **Pre-observation history survives.** At the baseline, the replay is aligned to the baseline content: lines agents wrote before observation began keep their author, and the rest become known pre-existing lines.
+- **Every line gets an author:**
+  - the agent, linked to its event when its transcript is synced
+  - outside any agent (`you`)
+  - pre-existing (`·`)
+  - untracked, when nothing recorded or observed it
+- **Several agents in one file.** Line history entries name their agent, so a file several agents worked on reads at a glance.
+
+When the file exists on disk, the result is aligned with its current content. A line changed after the last recorded or observed change is reported as untracked, never blamed on whatever change last touched that position.
 
 ### The story behind a line
 
