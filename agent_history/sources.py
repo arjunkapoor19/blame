@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from agent_history import model
-from agent_history.adapters import codex, codex_rollout
+from agent_history.adapters import claude_code, codex, codex_rollout
 from agent_history.model import NormalizedSession
 from agent_history.store import Store
 
@@ -46,12 +46,20 @@ def _codex_logs() -> Iterable[Path]:
     return sorted((home / "sessions").glob("**/rollout-*.jsonl"))
 
 
+def _claude_code_transcripts() -> Iterable[Path]:
+    home = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+    return sorted((home / "projects").glob("*/*.jsonl"))  # sub-agent transcripts live deeper
+
+
 SOURCES: list[Source] = [
     Source("codex-capture", 2, discover=lambda: [],
            matches=lambda p: p.is_dir() and (p / "events.jsonl").is_file(), normalize=codex.normalize),
     Source("codex-log", 1, discover=_codex_logs,
            matches=lambda p: p.is_file() and p.name.startswith("rollout-") and p.suffix == ".jsonl",
            normalize=codex_rollout.normalize),
+    Source("claude-code-log", 1, discover=_claude_code_transcripts,
+           matches=lambda p: p.is_file() and p.suffix == ".jsonl" and claude_code.looks_like_transcript(p),
+           normalize=claude_code.normalize),
 ]
 
 
@@ -112,6 +120,10 @@ def _ingest(store: Store, source: Source, path: Path, sources: list[Source]) -> 
         holder = _source_of(owner, sources)
         if holder is not None and holder.priority > source.priority:
             return Result(path, source.name, SKIPPED, owner["id"], f"already recorded by {holder.name}")
+        if (holder is not None and holder.priority == source.priority and owner["id"] != normalized.session.id
+                and (owner["ended_at"] or 0) > (normalized.session.ended_at or 0)):
+            # Two records of the same run (e.g. a resumed conversation copies its history): keep the latest.
+            return Result(path, source.name, SKIPPED, owner["id"], f"a more recent record ({owner['id']}) is stored")
     store.ingest(normalized, source.name)
     return Result(path, source.name, INGESTED, normalized.session.id)
 

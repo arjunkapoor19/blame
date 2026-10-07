@@ -45,8 +45,9 @@ Commands carry `payload.actions`, each typed `read`, `list`, `search` or `other`
 |---|---|---|---|
 | `codex-capture` | 2 | no (`ah ingest <capture dir>`) | `adapters/codex.py` |
 | `codex-log` | 1 | `$CODEX_HOME/sessions/**/rollout-*.jsonl` (default `~/.codex`) | `adapters/codex_rollout.py` |
+| `claude-code-log` | 1 | `$CLAUDE_CONFIG_DIR/projects/*/*.jsonl` (default `~/.claude`) | `adapters/claude_code.py` |
 
-`ah log` and `ah blame` sync every source first, re-reading only files whose size or modification time changed. When adapters change what they produce, `model.VERSION` is bumped. The next sync then rebuilds every stored session from the source path it remembers, so old sessions never keep stale normalized data. When two sources hold the same agent run (they share thread ids), the higher priority wins: a lower-priority record is skipped, and a higher-priority one replaces what's stored. A session is never stored twice.
+`ah log` and `ah blame` sync every source first, re-reading only files whose size or modification time changed. When adapters change what they produce, `model.VERSION` is bumped. The next sync then rebuilds every stored session from the source path it remembers, so old sessions never keep stale normalized data. When two sources hold the same agent run (they share thread ids), the higher priority wins: a lower-priority record is skipped, and a higher-priority one replaces what's stored. At equal priority, the record with the most recent activity wins (a resumed Claude Code conversation copies its history into a new transcript; the newer, longer copy is kept). A session is never stored twice.
 
 ## Codex App Server mapping
 
@@ -91,9 +92,39 @@ Source: the log Codex writes for every session, however it was started, at `~/.c
 
 Compared with a capture, a log has no approvals and no streaming. That's why captures have the higher priority.
 
+## Claude Code transcript mapping
+
+Source: the transcript Claude Code writes while it works, `~/.claude/projects/<cwd with / → ->/<session-id>.jsonl`. Adapter: `agent_history/adapters/claude_code.py`.
+
+| Claude Code record | canonical |
+|---|---|
+| `sessionId`, `version`, `cwd` (from the first records that carry them) | `Session` |
+| `uuid` of the conversation's first user/assistant record | `Thread`. Shared by every copy of a resumed conversation, so copies dedupe |
+| `type: user` with the person's text | `Turn` (keyed by `promptId`) + `user_message` |
+| `[Request interrupted by user…]` | the turn (by `promptId`) becomes `interrupted` |
+| a turn whose last reply ended with `stop_reason: end_turn` | `completed`; otherwise `incomplete` |
+| assistant `text` block | `agent_message`; the turn's last one gets `phase: final` (Claude Code doesn't label final answers; documented heuristic) |
+| assistant `thinking` block | `reasoning` (not shown in stories) |
+| `tool_use` + its `tool_result` (paired by id) | one event; status from the result: `completed`, `failed` (`is_error`), `declined` (rejected by the user), `interrupted` |
+| `Bash` | `command`. No exit code is recorded: 0 on success, parsed from `"Exit code N"` on failure. Output = stdout + stderr |
+| `Edit`, `MultiEdit`, `Write`, `NotebookEdit` | `file_change`. Diff built from `toolUseResult.structuredPatch` (jsdiff hunks; empty ranges renumbered to unified-diff convention); `Write` with `type: create` → `add` with full content |
+| `Read`, `NotebookRead`, `Grep`, `Glob`, `LS` | `tool_call` with `actions` (`read` / `search` / `list`), shown as `read …`. File contents are not copied into the store |
+| `Task`, `Agent` | `subagent_call` (prompt, description, agent type) |
+| any other tool (MCP, `WebFetch`, `TodoWrite`, …) | `tool_call` with arguments and raw result |
+| `message.usage` | `token_usage`, **once per API reply**: a reply is split across several records that repeat the same usage |
+| `isSidechain: true` records | events in a child thread |
+
+**Ignored:** `isMeta` records (slash-command output), compaction summaries, slash commands themselves (`<command-name>…`), and bookkeeping: `attachment`, `mode`, `permission-mode`, `ai-title`, `last-prompt`, `agent-name`, `atis-latch`, `cost-state`, `queue-operation`, `system`, `file-history-*`.
+
+Claude Code deletes transcripts after about 30 days by default. Sessions already synced stay in `ah`'s database.
+
+Not yet read: sub-agent transcripts under `<session-id>/subagents/`.
+
 ## Blame
 
 `ah blame` replays every non-declined `FileChange` in time order into a per-file line-origin map. `add` attributes every line. `update` hunks are applied by their line numbers, so the file's original content is not needed, and lines no recorded change touched stay unattributed. A replaced line keeps the history of the line it replaced, so `ah blame file:N` can show a line being written, broken and fixed.
+
+Each line also remembers its line number right after the edit that wrote it, so a story marks exactly that line in the edit's diff (not just the first line with the same text). For a large edit, such as creating a file, the diff is shown as a window around the line.
 
 When the file exists on disk, the replayed lines are aligned with its current content (`difflib`). Lines a human added or edited after the agent finished are reported as not written by a recorded agent, instead of being blamed on whatever agent change last touched that position.
 

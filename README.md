@@ -2,7 +2,7 @@
 
 An observability and history layer for AI coding agents. Git tells you what changed; Agent History tells you what the agent did that caused those changes.
 
-The current prototype reads the session logs **Codex** already writes, normalizes them into an agent-agnostic event model stored in SQLite, and answers "why does this line exist?" with `ah blame`. Use Codex exactly as you normally do; there is nothing to set up. An optional recorder captures richer detail through the Codex App Server protocol.
+It reads the session logs **Codex** and **Claude Code** already write, normalizes them into one agent-agnostic event model stored in SQLite, and answers "why does this line exist?" with `ah blame`, whichever agent wrote the line. Use your agents exactly as you normally do; there is nothing to set up. An optional recorder captures richer detail through the Codex App Server protocol.
 
 ```text
 $ ah blame shop.py:6
@@ -44,9 +44,10 @@ agent_history/               canonical model, SQLite store, blame, `ah` CLI
   sources.py                 every source of agent history, and syncing them
   adapters/codex.py          Codex recorder capture -> canonical events
   adapters/codex_rollout.py  Codex's own session logs -> canonical events
+  adapters/claude_code.py    Claude Code session transcripts -> canonical events
 tests/                       pytest suite; fixtures/ holds sanitized real captures
 codex-schema/                App Server schemas generated from the installed Codex (currently 0.155.1)
-docs/event-model.md          the canonical model, the Codex mapping, and how blame works
+docs/event-model.md          the canonical model, each agent's mapping, and how blame works
 docs/protocol-notes.md       what we've learned about the protocol from real captures
 captures/                    one directory per recorded session (gitignored; may contain code and prompts)
 ```
@@ -57,7 +58,7 @@ Requires [uv](https://docs.astral.sh/uv/). There are no runtime dependencies bey
 
 ```sh
 uv sync
-codex                                         # use Codex as usual, then:
+codex                                         # or `claude`: use your agent as usual, then:
 uv run ah blame path/to/file.py:42            # why does line 42 exist? (picks up new sessions automatically)
 ```
 
@@ -71,7 +72,7 @@ uv run ah ingest captures/<session-dir>       # load a recorder capture (wins ov
 uv run pytest                                 # tests
 ```
 
-`ah log` and `ah blame` first sync Codex's session logs (`$CODEX_HOME/sessions`, default `~/.codex/sessions`), reading only new or changed files. The database defaults to `~/.agent-history/history.db`. Override it with `--db` or `$AGENT_HISTORY_DB`. Each agent run is stored once, even if it was both logged and captured.
+`ah log` and `ah blame` first sync your agents' session logs (Codex: `$CODEX_HOME/sessions`, default `~/.codex/sessions`; Claude Code: `$CLAUDE_CONFIG_DIR/projects`, default `~/.claude/projects`), reading only new or changed files. History survives your agent's own cleanup: Claude Code, for example, deletes transcripts after about 30 days, but synced sessions stay in `ah`. The database defaults to `~/.agent-history/history.db`. Override it with `--db` or `$AGENT_HISTORY_DB`. Each agent run is stored once, even if it was both logged and captured.
 
 Blame aligns recorded history with the file on disk, so lines edited by hand afterwards aren't blamed on the agent. It can't yet see edits the agent made through shell commands (`sed -i`, `echo >>`); see `docs/event-model.md`.
 

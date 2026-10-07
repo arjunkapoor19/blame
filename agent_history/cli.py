@@ -11,12 +11,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_history import model, sources
-from agent_history.blame import BlamedLine, FileBlame, blame, story
+from agent_history.blame import HUNK_HEADER, BlamedLine, FileBlame, blame, story
 from agent_history.commands import is_test, read_only_label, summarize
 from agent_history.model import Event
 from agent_history.store import Store, default_db_path
 
 DIFF_PREVIEW = 12  # diff lines shown per file for edits other than the one that wrote the line
+ORIGIN_WINDOW = 8  # diff lines shown either side of the blamed line when its edit is large
 DETAIL = " " * 21  # indents an event's details under its text in a story
 WIDTH = 100
 DIFF_COLORS = {"+": "32", "-": "31"}
@@ -153,7 +154,7 @@ def _blame_line(store: Store, path: str, line: BlamedLine) -> int:
     if told.hidden_before:
         print(f"    … {told.hidden_before} earlier steps (ah log {origin.session_id})")
     for event in told.steps:
-        lines = _story_lines(event, cwd, path, line.text if event.id == origin.id else None)
+        lines = _story_lines(event, cwd, path, line.born if event.id == origin.id else None)
         if not lines:
             continue
         if event.id == origin.id:
@@ -171,11 +172,12 @@ def _blame_line(store: Store, path: str, line: BlamedLine) -> int:
     return 0
 
 
-def _story_lines(event: Event, cwd: str | None, blamed_path: str, blamed_text: str | None) -> list[str]:
+def _story_lines(event: Event, cwd: str | None, blamed_path: str, blamed_at: int | None) -> list[str]:
     """An event in a blame story: its summary line, then details (full messages, diffs).
 
-    `blamed_text` is set for the event that wrote the blamed line: its diff for the blamed
-    file is shown in full, with the line marked. Other diffs are previews.
+    `blamed_at` is set for the event that wrote the blamed line (the line's number right after
+    that edit): its diff for the blamed file is shown around that line, with the line marked.
+    Other diffs are previews.
     """
     if event.kind == model.AGENT_MESSAGE:
         label = "answer" if event.payload.get("phase") == "final" else "agent"
@@ -188,28 +190,49 @@ def _story_lines(event: Event, cwd: str | None, blamed_path: str, blamed_text: s
     for change in event.file_changes:
         if len(event.file_changes) > 1:
             details.append(_relative(change.path, cwd) + ":")
-        full = blamed_text is not None and change.path == blamed_path
-        details += _diff_lines(change, None if full else DIFF_PREVIEW, blamed_text if full else None)
+        origin = blamed_at is not None and change.path == blamed_path
+        details += _diff_lines(change, None if origin else DIFF_PREVIEW, blamed_at if origin else None)
     return [summary] + details
 
 
-def _diff_lines(change: model.FileChange, limit: int | None, mark: str | None) -> list[str]:
-    """A file change as diff lines (at most `limit`), flagging the first added line equal to `mark`."""
+def _diff_lines(change: model.FileChange, limit: int | None, mark: int | None) -> list[str]:
+    """A file change as diff lines, at most `limit` of them; or, when `mark` (a line number in the
+    file after the change) is given, the lines around the added line at that position, marked."""
     if change.kind == model.DELETE:
         return ["│ " + _color("31", "(file deleted)")]
     raw = change.diff or ""
     lines = ["+" + text for text in raw.splitlines()] if change.kind == model.ADD else raw.splitlines()
-    shown = lines if limit is None else lines[:limit]
-    out = []
-    for text in shown:
+    marked = _added_line_at(lines, mark) if mark is not None else None
+    if marked is None:
+        start, end = 0, len(lines) if limit is None else min(limit, len(lines))
+    elif len(lines) <= 2 * ORIGIN_WINDOW + 1:
+        start, end = 0, len(lines)
+    else:
+        start, end = max(0, marked - ORIGIN_WINDOW), min(len(lines), marked + ORIGIN_WINDOW + 1)
+    out = ["│ " + _color("2", f"… {start} lines above")] if start else []
+    for index in range(start, end):
+        text = lines[index]
         rendered = "│ " + _color("2" if text.startswith("@@") else DIFF_COLORS.get(text[:1], ""), text)
-        if mark is not None and text[:1] == "+" and text[1:] == mark:
-            rendered += "   ← this line"
-            mark = None
-        out.append(rendered)
-    if len(lines) > len(shown):
-        out.append("│ " + _color("2", f"… {len(lines) - len(shown)} more lines"))
+        out.append(rendered + ("   ← this line" if index == marked else ""))
+    if end < len(lines):
+        out.append("│ " + _color("2", f"… {len(lines) - end} more lines"))
     return out
+
+
+def _added_line_at(lines: list[str], number: int) -> int | None:
+    """Index of the added diff line that lands at line `number` of the new file, if any."""
+    new_line = 1
+    for index, text in enumerate(lines):
+        header = HUNK_HEADER.match(text)
+        if header:
+            new_line = int(header[3]) if int(header[4] or 1) else int(header[3]) + 1
+        elif text.startswith("+"):
+            if new_line == number:
+                return index
+            new_line += 1
+        elif not text.startswith(("-", "\\")):
+            new_line += 1
+    return None
 
 
 def _color(code: str, text: str) -> str:
@@ -259,11 +282,15 @@ def describe(event: Event, cwd: str | None = None) -> str | None:
     if event.kind == model.APPROVAL:
         return f"approval {event.status or 'unanswered'}: {_first_line(p.get('command') or p.get('subject'), 80)}"
     if event.kind == model.TOOL_CALL:
+        reads = read_only_label(p) if event.status == "completed" else None
+        if reads:
+            return f"read     {reads}"
         name = "/".join(str(x) for x in (p.get("server"), p.get("tool")) if x)
         return f"tool     {name} ({event.status})"
     if event.kind == model.SUBAGENT_CALL:
         receivers = ", ".join(t[-8:] for t in p.get("receiver_thread_ids") or [])
-        return f"subagent {p.get('action')} → {receivers or '?'}  {_quote(p.get('prompt'), 60)}"
+        target = f" → {receivers}" if receivers else ""
+        return f"subagent {p.get('action')}{target}  {_quote(p.get('description') or p.get('prompt'), 60)}"
     if event.kind == model.ERROR:
         return f"error    {_first_line(p.get('message'), 100)}"
     if event.kind == model.REASONING and p.get("summary"):

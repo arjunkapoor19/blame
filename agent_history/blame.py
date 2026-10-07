@@ -34,6 +34,7 @@ class Line:
     text: str | None  # None: a pre-existing line whose content was never recorded
     origin: str | None = None  # id of the event that wrote this line
     history: list[tuple[str, str]] = field(default_factory=list)  # (event id, text), oldest first
+    born: int | None = None  # its line number in the file right after `origin` wrote it
 
 
 @dataclass
@@ -50,6 +51,7 @@ class BlamedLine:
     text: str | None
     origin: Event | None
     history: list[tuple[Event, str]]
+    born: int | None = None  # its line number in the file right after its origin event
 
     @property
     def rewrites(self) -> int:
@@ -70,7 +72,8 @@ def replay(changes: list[tuple[str, str, str, str | None, str | None]],
     files: dict[str, list[Line]] = {}
     for path, event_id, kind, diff, move_path in changes:
         if kind == model.ADD:
-            files[path] = [Line(text, event_id, [(event_id, text)]) for text in (diff or "").splitlines()]
+            files[path] = [Line(text, event_id, [(event_id, text)], number)
+                           for number, text in enumerate((diff or "").splitlines(), start=1)]
         elif kind == model.DELETE:
             files.pop(path, None)
         else:
@@ -119,7 +122,7 @@ def _apply_hunk(lines: list[Line], index: int, body: list[str], event_id: str) -
             pad(index)
             replaced = removed.pop(0) if removed else None
             history = (replaced.history if replaced else []) + [(event_id, text)]
-            lines.insert(index, Line(text, event_id, history))
+            lines.insert(index, Line(text, event_id, history, index + 1))
             index += 1
         else:  # context
             removed = []
@@ -152,7 +155,7 @@ def blame(store: Store, path: str) -> FileBlame:
         origin = event(line.origin) if line else None
         if line is None or origin is None:
             return BlamedLine(number, text, None, [])
-        return BlamedLine(number, text, origin, [(event(e), t) for e, t in line.history])
+        return BlamedLine(number, text, origin, [(event(e), t) for e, t in line.history], line.born)
 
     disk = Path(target)
     if not disk.is_file():

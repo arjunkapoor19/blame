@@ -11,3 +11,6 @@ dist/
 __pycache__/
 *.pyc
 .DS_Store
+
+# local session notes, never committed
+HANDOFF.md
