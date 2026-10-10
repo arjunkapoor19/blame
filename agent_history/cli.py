@@ -10,7 +10,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-from agent_history import hooks, model, sources
+from agent_history import hooks, model, sources, view
 from agent_history import setup as agent_setup
 from agent_history.blame import (Author, BlamedLine, FileBlame, added_line_at, blame, delegation,
                                  observed_file_changes, story)
@@ -48,6 +48,10 @@ def main(argv: list[str] | None = None) -> int:
     setup_cmd.add_argument("agents", nargs="*", help=f"Agents to set up: {', '.join(agent_setup.AGENTS)} "
                                                       "(default: all)")
     setup_cmd.add_argument("--remove", action="store_true", help="Remove ah's hooks instead.")
+    view_cmd = commands.add_parser("view", help="Open the history in your browser (a local, read-only page).")
+    view_cmd.add_argument("target", nargs="?", help="PATH or PATH:LINE to open at")
+    view_cmd.add_argument("--port", type=int, default=view.DEFAULT_PORT, help="(default: %(default)s, or any free one)")
+    view_cmd.add_argument("--no-open", action="store_true", help="Don't open a browser; just serve.")
     hook_cmd = commands.add_parser("hook", help="(Run by agents.) Observe the workspace around a tool call.")
     hook_cmd.add_argument("agent")
     hook_cmd.add_argument("event", choices=hooks.EVENTS)
@@ -61,6 +65,8 @@ def main(argv: list[str] | None = None) -> int:
         except (LookupError, ValueError) as error:
             print(f"ah: {error.args[0]}", file=sys.stderr)
             return 1
+    if args.command == "view":
+        return view.run(view.Server(args.port, args.db), args.target, not args.no_open)
     store = Store(args.db)
     try:
         if args.command == "ingest":

@@ -219,6 +219,22 @@ class Store:
             ORDER BY e.started_at, e.session_id, e.seq, f.idx
         """).fetchall()
 
+    def known_paths(self) -> list[sqlite3.Row]:
+        """Every file agents changed or ah saw change: path, the workspace it belongs to, how many
+        changes, the agents involved and when it last changed. Most recently changed first."""
+        return self.db.execute("""
+            SELECT path, MAX(root) AS root, COUNT(*) AS changes, GROUP_CONCAT(DISTINCT agent) AS agents,
+                   MAX(at) AS last_changed
+            FROM (SELECT f.path, s.cwd AS root, s.agent, e.started_at AS at
+                  FROM file_changes f JOIN events e ON e.id = f.event_id JOIN sessions s ON s.id = e.session_id
+                  WHERE e.status IS NULL OR e.status NOT IN ('declined', 'failed')
+                  UNION ALL
+                  SELECT c.path, o.root, o.agent, o.ended_at
+                  FROM observed_changes c JOIN observations o ON o.id = c.observation_id
+                  WHERE o.actor != 'baseline' AND o.ended_at IS NOT NULL)
+            GROUP BY path ORDER BY last_changed DESC, path
+        """).fetchall()
+
     def owner_of_threads(self, thread_ids: list[str]) -> sqlite3.Row | None:
         """The stored session that already holds any of these threads, if one does."""
         for thread_id in thread_ids:

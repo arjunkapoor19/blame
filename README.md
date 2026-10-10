@@ -46,6 +46,9 @@ agent_history/               canonical model, SQLite store, blame, `ah` CLI
   adapters/codex_rollout.py  Codex's own session logs -> canonical events
   adapters/claude_code.py    Claude Code session transcripts -> canonical events
   adapters/opencode.py       opencode's session database -> canonical events
+  view.py                    `ah view`: a local server and JSON API for the viewer
+  static/                    the viewer's built page (generated from web/, committed)
+web/                         the viewer's source: Vite + React + Tailwind
 tests/                       pytest suite; fixtures/ holds sanitized real captures
 codex-schema/                App Server schemas generated from the installed Codex (currently 0.155.1)
 docs/event-model.md          the canonical model, each agent's mapping, and how blame works
@@ -62,7 +65,16 @@ uv tool install --editable .                  # puts `ah` on your PATH
 ah setup                                      # once: let ah observe Claude Code, Codex and opencode tool calls
 codex                                         # or `claude` or `opencode`: use your agent as usual, then:
 ah blame path/to/file.py:42                   # why does line 42 exist? (picks up new sessions automatically)
+ah view path/to/file.py:42                    # the same, in your browser
 ```
+
+### In the browser
+
+`ah view` opens the history as a page on your machine: each file with who wrote every block, and, for any line you click, the story behind it (what you asked, each hand-off to a sub-agent, the agent's steps with diffs and test results). `j`/`k` move between lines, `⌘K` finds any file or session, `?` lists the shortcuts. The page follows your agents live: it re-syncs every few seconds, so lines change hands as an agent works.
+
+The server listens on 127.0.0.1 only, answers only requests addressed to it by that name, and only reads. The page ships prebuilt inside the package: no Node needed to use it. `ah view --no-open --port N` just serves.
+
+<!-- screenshot: docs/viewer.png -->
 
 `ah setup` adds small hooks to your user-level Claude Code and Codex settings (`~/.claude/settings.json`, `~/.codex/hooks.json`) and a small opencode plugin (`~/.config/opencode/plugin/agent-history.js`). Before and after every tool call that can change files, they snapshot the project, so `ah` sees exactly what each call changed, including edits made through the shell (`printf >> f`, `sed -i`, scripts), which agents don't report. Edits made between tool calls are labeled as made outside any agent (`you`). Each hook takes about 0.1 s. Your settings are backed up as `*.agent-history.bak`, and `ah setup --remove` takes the hooks out again. Codex asks you to trust new hooks once; restart opencode to load the plugin. Without `ah setup`, `ah` still works from agents' logs, but can't see shell edits.
 
@@ -77,6 +89,17 @@ uv run ah ingest                              # sync agent logs explicitly and l
 uv run ah ingest captures/<session-dir>       # load a recorder capture (wins over the log of the same session)
 uv run pytest                                 # tests
 ```
+
+Working on the viewer (`web/`) needs Node 20+:
+
+```sh
+uv run ah view --no-open                      # the API, on 127.0.0.1:4545
+cd web && npm ci && npm run dev               # the page with hot reload, sending /api to ah view
+npm test                                      # frontend unit tests
+npm run build                                 # rebuild agent_history/static/ (commit the result)
+```
+
+The build fails if the first paint needs more than 120 KB of JavaScript (gzipped), and the Python tests fail if `web/` changed without a rebuild.
 
 `ah log` and `ah blame` first sync your agents' session logs (Codex: `$CODEX_HOME/sessions`, default `~/.codex/sessions`; Claude Code: `$CLAUDE_CONFIG_DIR/projects`, default `~/.claude/projects`; opencode: `~/.local/share/opencode/opencode.db`, read-only), reading only new or changed sessions. History survives your agent's own cleanup: Claude Code, for example, deletes transcripts after about 30 days, but synced sessions stay in `ah`. The database defaults to `~/.agent-history/history.db`. Override it with `--db` or `$AGENT_HISTORY_DB`. Each agent run is stored once, even if it was both logged and captured.
 

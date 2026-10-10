@@ -201,3 +201,16 @@ Agent messages are shown in full. Every edit shows its diff: the edit that wrote
 
 **Known gap:** edits made through shell commands (`sed -i`, `echo >> file`) aren't `fileChange` items, so blame can't see them yet. `turn/diff/updated` is the planned source for recovering them.
 
+## The viewer's API
+
+`ah view` serves a read-only JSON API on 127.0.0.1 (`agent_history/view.py`). Every answer is built from the same functions `ah blame` and `ah log` print from, and steps are classified once (`present.outline`) for both, so the terminal and the page always agree.
+
+| Route | Answer |
+|---|---|
+| `/api/status` | whether the first sync is still running, what the last one found, and `version`, which changes with every write to the database (the page refetches when it does) |
+| `/api/files` | every file agents changed or ah saw change: path, workspace, number of changes, agents, last change |
+| `/api/blame?path=` | the file's lines, each pointing at one entry of `authors` (agent, session, the turn you asked in, when), plus totals per author |
+| `/api/story?path=&line=` | the line's story, by kind: `agent` (prompt, sub-agent hand-offs, steps with diffs and the written line `marked`, line history), `outside`, `baseline`, `unsynced` or `none` |
+| `/api/sessions`, `/api/sessions/<id>` | sessions newest first; one session's turns with their steps, a sub-agent's turns naming the turn that delegated them (`delegated_from`) and each edit the line it starts at |
+
+Requests whose `Host` isn't `127.0.0.1:<port>` or `localhost:<port>` are refused, which stops other sites reaching the API through DNS rebinding.
