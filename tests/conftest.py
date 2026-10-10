@@ -8,6 +8,8 @@ def no_real_agent_logs(tmp_path_factory, monkeypatch):
     """`ah log`/`ah blame` sync agent logs from this machine; tests must never see the real ones."""
     monkeypatch.setenv("CODEX_HOME", str(tmp_path_factory.mktemp("codex-home")))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path_factory.mktemp("claude-home")))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path_factory.mktemp("xdg-data")))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path_factory.mktemp("xdg-config")))
 
 
 @pytest.fixture(autouse=True)

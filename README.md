@@ -2,7 +2,7 @@
 
 An observability and history layer for AI coding agents. Git tells you what changed; Agent History tells you what the agent did that caused those changes.
 
-It reads the session logs **Codex** and **Claude Code** already write, normalizes them into one agent-agnostic event model stored in SQLite, and answers "why does this line exist?" with `ah blame`, whichever agent wrote the line. Use your agents exactly as you normally do; there is nothing to set up. An optional recorder captures richer detail through the Codex App Server protocol.
+It reads the session history **Codex**, **Claude Code** and **opencode** already write, normalizes them into one agent-agnostic event model stored in SQLite, and answers "why does this line exist?" with `ah blame`, whichever agent wrote the line. Use your agents exactly as you normally do; there is nothing to set up. An optional recorder captures richer detail through the Codex App Server protocol.
 
 ```text
 $ ah blame shop.py:6
@@ -45,6 +45,7 @@ agent_history/               canonical model, SQLite store, blame, `ah` CLI
   adapters/codex.py          Codex recorder capture -> canonical events
   adapters/codex_rollout.py  Codex's own session logs -> canonical events
   adapters/claude_code.py    Claude Code session transcripts -> canonical events
+  adapters/opencode.py       opencode's session database -> canonical events
 tests/                       pytest suite; fixtures/ holds sanitized real captures
 codex-schema/                App Server schemas generated from the installed Codex (currently 0.155.1)
 docs/event-model.md          the canonical model, each agent's mapping, and how blame works
@@ -58,26 +59,26 @@ Requires [uv](https://docs.astral.sh/uv/). There are no runtime dependencies bey
 
 ```sh
 uv tool install --editable .                  # puts `ah` on your PATH
-ah setup                                      # once: let ah observe Claude Code and Codex tool calls
-codex                                         # or `claude`: use your agent as usual, then:
+ah setup                                      # once: let ah observe Claude Code, Codex and opencode tool calls
+codex                                         # or `claude` or `opencode`: use your agent as usual, then:
 ah blame path/to/file.py:42                   # why does line 42 exist? (picks up new sessions automatically)
 ```
 
-`ah setup` adds small hooks to your user-level Claude Code and Codex settings (`~/.claude/settings.json`, `~/.codex/hooks.json`). Before and after every tool call that can change files, they snapshot the project, so `ah` sees exactly what each call changed, including edits made through the shell (`printf >> f`, `sed -i`, scripts), which agents don't report. Edits made between tool calls are labeled as made outside any agent (`you`). Each hook takes about 0.1 s. Your settings are backed up as `*.agent-history.bak`, and `ah setup --remove` takes the hooks out again. Codex asks you to trust new hooks once. Without `ah setup`, `ah` still works from agents' logs, but can't see shell edits.
+`ah setup` adds small hooks to your user-level Claude Code and Codex settings (`~/.claude/settings.json`, `~/.codex/hooks.json`) and a small opencode plugin (`~/.config/opencode/plugin/agent-history.js`). Before and after every tool call that can change files, they snapshot the project, so `ah` sees exactly what each call changed, including edits made through the shell (`printf >> f`, `sed -i`, scripts), which agents don't report. Edits made between tool calls are labeled as made outside any agent (`you`). Each hook takes about 0.1 s. Your settings are backed up as `*.agent-history.bak`, and `ah setup --remove` takes the hooks out again. Codex asks you to trust new hooks once; restart opencode to load the plugin. Without `ah setup`, `ah` still works from agents' logs, but can't see shell edits.
 
 Snapshots keep copies of text files up to 1 MB under `~/.agent-history/objects`, next to the database. They never leave your machine.
 
 ```sh
 uv run ah log                                 # list sessions
 uv run ah log <session>                       # one session's timeline (any unique part of the id)
-uv run ah blame path/to/file.py               # who wrote each line: which agent (or you), session, turn
+uv run ah blame path/to/file.py               # who wrote each line: which agent (or you), session, turn, when
 uv run ah blame path/to/file.py:42            # one line: the story of the turn that wrote it
 uv run ah ingest                              # sync agent logs explicitly and list what was loaded
 uv run ah ingest captures/<session-dir>       # load a recorder capture (wins over the log of the same session)
 uv run pytest                                 # tests
 ```
 
-`ah log` and `ah blame` first sync your agents' session logs (Codex: `$CODEX_HOME/sessions`, default `~/.codex/sessions`; Claude Code: `$CLAUDE_CONFIG_DIR/projects`, default `~/.claude/projects`), reading only new or changed files. History survives your agent's own cleanup: Claude Code, for example, deletes transcripts after about 30 days, but synced sessions stay in `ah`. The database defaults to `~/.agent-history/history.db`. Override it with `--db` or `$AGENT_HISTORY_DB`. Each agent run is stored once, even if it was both logged and captured.
+`ah log` and `ah blame` first sync your agents' session logs (Codex: `$CODEX_HOME/sessions`, default `~/.codex/sessions`; Claude Code: `$CLAUDE_CONFIG_DIR/projects`, default `~/.claude/projects`; opencode: `~/.local/share/opencode/opencode.db`, read-only), reading only new or changed sessions. History survives your agent's own cleanup: Claude Code, for example, deletes transcripts after about 30 days, but synced sessions stay in `ah`. The database defaults to `~/.agent-history/history.db`. Override it with `--db` or `$AGENT_HISTORY_DB`. Each agent run is stored once, even if it was both logged and captured.
 
 Blame aligns everything with the file on disk, so a line nothing recorded or observed is reported as untracked, never misattributed. See `docs/event-model.md` for how it all fits together.
 

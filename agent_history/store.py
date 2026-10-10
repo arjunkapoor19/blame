@@ -8,7 +8,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from agent_history.model import FILE_CHANGE, VERSION as MODEL_VERSION, Event, FileChange, NormalizedSession
+from agent_history.model import (FILE_CHANGE, SUBAGENT_CALL, VERSION as MODEL_VERSION, Event, FileChange,
+                                 NormalizedSession)
 
 DEFAULT_DB = Path.home() / ".agent-history" / "history.db"
 
@@ -190,6 +191,13 @@ class Store:
 
     def turn(self, turn_id: str) -> sqlite3.Row | None:
         return self.db.execute("SELECT * FROM turns WHERE id = ?", (turn_id,)).fetchone()
+
+    def spawner(self, thread_id: str) -> Event | None:
+        """The sub-agent call that started a child thread, if the agent recorded which thread it started."""
+        row = self.db.execute(
+            "SELECT e.* FROM events e, json_each(e.payload, '$.receiver_thread_ids') r "
+            "WHERE e.kind = ? AND r.value = ? ORDER BY e.seq LIMIT 1", (SUBAGENT_CALL, thread_id)).fetchone()
+        return self._event(row) if row else None
 
     def events(self, session_id: str | None = None, turn_id: str | None = None) -> list[Event]:
         if turn_id is not None:

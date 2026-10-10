@@ -46,6 +46,7 @@ Commands carry `payload.actions`, each typed `read`, `list`, `search` or `other`
 | `codex-capture` | 2 | no (`ah ingest <capture dir>`) | `adapters/codex.py` |
 | `codex-log` | 1 | `$CODEX_HOME/sessions/**/rollout-*.jsonl` (default `~/.codex`) | `adapters/codex_rollout.py` |
 | `claude-code-log` | 1 | `$CLAUDE_CONFIG_DIR/projects/*/*.jsonl` (default `~/.claude`) | `adapters/claude_code.py` |
+| `opencode-db` | 1 | every top-level session in `$XDG_DATA_HOME/opencode/opencode.db` (default `~/.local/share`), as `<database>/<session id>` | `adapters/opencode.py` |
 
 `ah log` and `ah blame` sync every source first, re-reading only files whose size or modification time changed. When adapters change what they produce, `model.VERSION` is bumped. The next sync then rebuilds every stored session from the source path it remembers, so old sessions never keep stale normalized data. When two sources hold the same agent run (they share thread ids), the higher priority wins: a lower-priority record is skipped, and a higher-priority one replaces what's stored. At equal priority, the record with the most recent activity wins (a resumed Claude Code conversation copies its history into a new transcript; the newer, longer copy is kept). A session is never stored twice.
 
@@ -120,6 +121,30 @@ Claude Code deletes transcripts after about 30 days by default. Sessions already
 
 Not yet read: sub-agent transcripts under `<session-id>/subagents/`.
 
+## opencode mapping
+
+opencode keeps every session in one SQLite database, opened read-only. A source normally maps one file to one session; here each session gets the virtual path `<database>/<session id>`, and the session's `time_updated` replaces the file's mtime and size to tell whether it changed since the last sync (`Source.stamp`). Records have no line numbers, so each event keeps the opencode part or message id in `payload.record_id` instead of `source_lines`.
+
+| opencode record | canonical |
+|---|---|
+| top-level `session` row (`id`, `version`, `directory`, times) | `Session` and its main `Thread` (same id) |
+| `session` row with `parent_id` (a sub-agent run by `task`) | a child `Thread` (its own id, `parent_thread_id` = `parent_id`) of the top-level session, at any depth. Its turns and events belong to that thread; the session's `ended_at` and sync stamp are the latest over the whole tree, so a sub-agent's activity re-syncs its parent |
+| `message` with `role: user` | `Turn` + `user_message`; text from its `text` parts, minus `synthetic` ones (file contents opencode attaches) |
+| `message` with `role: assistant` | belongs to the turn named by `parentID`. Turn status from the last reply: `error.name: MessageAbortedError` → `interrupted`, another `error` → `failed` (plus an `error` event), `finish` other than `tool-calls` → `completed`, else `incomplete` |
+| `text` part | `agent_message`; the turn's last one gets `phase: final` (opencode doesn't label final answers) |
+| `reasoning` part | `reasoning` |
+| `tool` part (`callID` → `source_id`) | one event; status from `state.status`: `completed`, `error` → `failed`, `declined` (permission rejected or denied by a rule) or `interrupted` (aborted); `pending`/`running` → `interrupted` in an interrupted turn, else `incomplete` |
+| `bash` | `command`; `metadata.exit` → `exit_code` (a non-zero exit makes it `failed`), `metadata.output` → `output` |
+| `edit`, `write`, `multiedit`, `patch`, `apply_patch` | `file_change`. Diff built from `metadata.filediff.before`/`after` (full contents), or `metadata.filediff.patch` where newer versions keep only that. `metadata.diff` is only a fallback: opencode strips common indentation from it for display, so its lines aren't the file's. `write` with `metadata.exists: false` → `add` with full content |
+| `read`, `grep`, `glob`, `list` | `tool_call` with `actions` (`read` / `search` / `list`). File contents are not copied into the store |
+| `task` | `subagent_call` (the child session id from `metadata.sessionId` in `receiver_thread_ids`) |
+| any other tool | `tool_call` with arguments and output |
+| `step-finish` part `tokens` | `token_usage`, once per model call; `input` includes `cache.read` and `cache.write` |
+
+**Ignored:** `step-start`, `patch` (snapshot hashes), `snapshot`, `file`, `agent`, `compaction` parts.
+
+Normalizing any session of a tree (`ah ingest <db>/<child id>`) normalizes the whole tree from its top-level session.
+
 ## Observed changes
 
 Agents only report changes they make with their edit tools, so a shell command's side effects (`printf >> f`, `sed -i`, a script that writes files) are invisible in their logs. `ah setup` therefore installs hooks (`agent_history/setup.py`) that run `ah hook <agent> pre|post|stop` (`agent_history/hooks.py`) around each tool call that can change files. Each run snapshots the workspace (`agent_history/workspace.py`) and records the difference as an **observation**:
@@ -132,7 +157,7 @@ Agents only report changes they make with their edit tools, so a shell command's
 - **Overlapping observations in one workspace** (parallel tool calls, two agents at once) are marked `concurrent`.
 - **Hooks never disturb the agent.** They're serialized with a file lock, always exit 0, never write to stdout, and log failures to `hooks.log` next to the database.
 
-Hook input is the same for both agents (`session_id`, `tool_use_id`, `tool_name`, `tool_input`, `cwd`, …; Codex adds `turn_id`); parsers live in `hooks.PARSERS`. Verified with real hook calls:
+Hook input is the same for every agent (`session_id`, `tool_use_id`, `tool_name`, `tool_input`, `cwd`, …; Codex adds `turn_id`); parsers live in `hooks.PARSERS`. opencode has no hook settings: its hooks are JS plugins, so `ah setup` writes one, `$XDG_CONFIG_HOME/opencode/plugin/agent-history.js` (default `~/.config`), tagged on its first line. It runs `ah hook opencode pre|post` from `tool.execute.before`/`after` (every tool) and `stop` on `session.idle` and `chat.message`, sending the same fields: `session_id` = opencode's `sessionID`, `tool_use_id` = its `callID`, `cwd` = the plugin's `directory`. Verified with real hook calls:
 - **Claude Code:** `tool_use_id` is the transcript's `tool_use.id` (`toolu_…`), and `session_id` is its `sessionId`.
 - **Codex:** `tool_use_id` is the item id in its session log (`exec-…`), and `session_id` is the thread id.
 - **Shell tool name:** both agents call it `Bash`.
@@ -149,6 +174,7 @@ Observed changes join the same timeline:
 
 - **Aligning instead of patching.** For an observed change, the replay is aligned (`difflib`) to the file's actual content after the change. Lines that stayed keep their author; new or changed lines belong to that observation, and carry the history of the lines they replaced. Because the content is ground truth, the replay corrects itself.
 - **No double counting.** An observed tool call replaces the same call's recorded changes for that file.
+- **Sub-agents.** A line written in a child thread is credited to its session, with the turn the person asked in (found through the `subagent_call` whose `receiver_thread_ids` names the thread), and the story shows each hand-off: `turn 1 › sub-agent 22222222`, the person's prompt, then the prompt each sub-agent was given. `ah log` labels a sub-agent's turns `sub-agent <id>, from turn N`.
 - **Pre-observation history survives.** At the baseline, the replay is aligned to the baseline content: lines agents wrote before observation began keep their author, and the rest become known pre-existing lines.
 - **Every line gets an author:**
   - the agent, linked to its event when its transcript is synced
@@ -174,3 +200,4 @@ Agent messages are shown in full. Every edit shows its diff: the edit that wrote
 - **Read-only commands** (every action is a read, list or search) are shown as `read shop.py, list files`.
 
 **Known gap:** edits made through shell commands (`sed -i`, `echo >> file`) aren't `fileChange` items, so blame can't see them yet. `turn/diff/updated` is the planned source for recovering them.
+

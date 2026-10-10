@@ -1,6 +1,7 @@
 """Blame with observed workspaces: shell edits, outside edits, baselines, several agents."""
 
 import json
+import re
 import subprocess
 from datetime import datetime
 
@@ -96,12 +97,14 @@ def test_a_shell_edit_is_attributed_to_its_command(tmp_path, repo, store, capsys
     assert main(["--db", db, "blame", f"{repo}/shop.py"]) == 0
     out = capsys.readouterr().out
     header, rows = out.splitlines()[0], out.splitlines()[1:]
-    assert header.split() == ["author", "session", "turn", "time", "#", "code"]
+    assert header.split() == ["author", "session", "turn", "when", "#", "code"]
     assert rows[0].startswith("·       ")
-    assert rows[4].startswith("claude  333333  t1 ")
+    assert rows[4].startswith("claude   333333  t1 ")
     # Column titles sit over their columns.
     assert header.index("session") == rows[4].index("333333")
     assert header.index("turn") == rows[4].index("t1")
+    when = re.search(r"[A-Z][a-z]{2} \d\d '\d\d \d\d:\d\d", rows[4])  # e.g. Oct 07 '26 15:11
+    assert when and header.index("when") == when.start()
     assert header.index("#") == rows[4].index("5  def divide") 
     assert "4 claude · 2 pre-existing" in out
 

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from agent_history import model
-from agent_history.adapters import claude_code, codex, codex_rollout
+from agent_history.adapters import claude_code, codex, codex_rollout, opencode
 from agent_history.model import NormalizedSession
 from agent_history.store import Store
 
@@ -30,6 +30,8 @@ class Source:
     discover: Callable[[], Iterable[Path]]  # records to sync automatically; may be empty
     matches: Callable[[Path], bool]  # is this path one of ours? (for explicit `ah ingest PATH`)
     normalize: Callable[[Path], NormalizedSession]
+    # what tells a record has changed since the last sync; by default the file's mtime and size
+    stamp: Callable[[Path], "tuple[int, int] | None"] = lambda path: _file_stamp(path)
 
 
 @dataclass
@@ -39,6 +41,14 @@ class Result:
     status: str  # INGESTED | SKIPPED | FAILED
     session_id: str | None = None
     reason: str | None = None
+
+
+def _file_stamp(path: Path) -> tuple[int, int] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return stat.st_mtime_ns, stat.st_size
 
 
 def _codex_logs() -> Iterable[Path]:
@@ -51,6 +61,32 @@ def _claude_code_transcripts() -> Iterable[Path]:
     return sorted((home / "projects").glob("*/*.jsonl"))  # sub-agent transcripts live deeper
 
 
+# opencode keeps all sessions in one database, so each session gets a virtual path under it
+# (`<database>/<session id>`), and its last update time stands in for the file's stat.
+_opencode_updated: dict[Path, int] = {}
+
+
+def _opencode_database() -> Path:
+    data = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
+    return data / "opencode" / "opencode.db"
+
+
+def _opencode_sessions() -> Iterable[Path]:
+    database = _opencode_database()
+    if not database.is_file():
+        return []
+    found = {database / session_id: updated for session_id, updated in opencode.sessions(database)}
+    _opencode_updated.update(found)
+    return sorted(found)
+
+
+def _opencode_stamp(path: Path) -> tuple[int, int] | None:
+    if path not in _opencode_updated:
+        _opencode_updated.update({path.parent / s: u for s, u in opencode.sessions(path.parent)})
+    updated = _opencode_updated.get(path)
+    return (updated, 0) if updated is not None else None
+
+
 SOURCES: list[Source] = [
     Source("codex-capture", 2, discover=lambda: [],
            matches=lambda p: p.is_dir() and (p / "events.jsonl").is_file(), normalize=codex.normalize),
@@ -60,6 +96,9 @@ SOURCES: list[Source] = [
     Source("claude-code-log", 1, discover=_claude_code_transcripts,
            matches=lambda p: p.is_file() and p.suffix == ".jsonl" and claude_code.looks_like_transcript(p),
            normalize=claude_code.normalize),
+    Source("opencode-db", 1, discover=_opencode_sessions,
+           matches=lambda p: p.parent.name == "opencode.db" and p.parent.is_file(),
+           normalize=opencode.normalize, stamp=_opencode_stamp),
 ]
 
 
@@ -76,15 +115,14 @@ def sync(store: Store, sources: list[Source] = SOURCES) -> list[Result]:
     results = _renormalize(store, sources) if store.model_version() != model.VERSION else []
     for source in sources:
         for path in source.discover():
-            try:
-                stat = path.stat()
-            except OSError:
+            stamp = source.stamp(path)
+            if stamp is None:
                 continue
             key = str(path.resolve())
-            if store.file_unchanged(key, stat.st_mtime_ns, stat.st_size):
+            if store.file_unchanged(key, *stamp):
                 continue
             results.append(_ingest(store, source, path, sources))
-            store.mark_synced(key, stat.st_mtime_ns, stat.st_size)  # failures too, until the file changes
+            store.mark_synced(key, *stamp)  # failures too, until the file changes
     return results
 
 

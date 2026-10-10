@@ -45,12 +45,14 @@ class HookCall:
 
 
 def _claude_compatible(agent: str) -> Callable[[dict[str, Any]], HookCall]:
-    """Claude Code's hook input; Codex uses the same fields (`session_id`, `tool_use_id`, ...)."""
+    """Claude Code's hook input; Codex uses the same fields (`session_id`, `tool_use_id`, ...), and
+    ah's opencode plugin sends them too."""
     def parse(payload: dict[str, Any]) -> HookCall:
         tool_input = payload.get("tool_input")
         command = None
         if isinstance(tool_input, dict):
-            command = tool_input.get("command") or tool_input.get("file_path") or tool_input.get("notebook_path")
+            command = (tool_input.get("command") or tool_input.get("file_path") or tool_input.get("filePath")
+                       or tool_input.get("notebook_path"))
         elif isinstance(tool_input, str):
             command = tool_input
         return HookCall(agent, payload.get("session_id"), payload.get("tool_use_id"), payload.get("tool_name"),
@@ -62,6 +64,7 @@ def _claude_compatible(agent: str) -> Callable[[dict[str, Any]], HookCall]:
 PARSERS: dict[str, Callable[[dict[str, Any]], HookCall]] = {
     "claude-code": _claude_compatible("claude-code"),
     "codex": _claude_compatible("codex"),
+    "opencode": _claude_compatible("opencode"),
 }
 
 

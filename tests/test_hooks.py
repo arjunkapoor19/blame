@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from agent_history import model
-from agent_history.hooks import handle, run
+from agent_history.hooks import PARSERS, handle, run
 from agent_history.store import Store
 from agent_history.workspace import Blobs
 
@@ -128,7 +128,6 @@ REAL_CODEX = {"session_id": "01a10714-203f-7172-a0a4-09521747b2ad", "transcript_
 
 
 def test_real_payloads_parse():
-    from agent_history.hooks import PARSERS
     claude = PARSERS["claude-code"](REAL_CLAUDE)
     assert (claude.session_id, claude.tool_call_id, claude.tool_name, claude.cwd) == (
         "72a77881-0000-4000-8000-000000000000", "toolu_01Hm", "Bash", "/workspace")
@@ -145,3 +144,16 @@ def test_codex_hook_calls_link_to_codex_log_events(store):
     store.ingest(codex_rollout.normalize(log))
     event = store.event(store.linked_event_id(REAL_CODEX["session_id"], REAL_CODEX["tool_use_id"]))
     assert event.kind == model.COMMAND and event.payload["command"] == "rg --files"
+
+
+def test_opencode_hook_calls_link_to_opencode_events(tmp_path, store):
+    """The plugin sends opencode's `sessionID` and `callID`; the adapter keeps `callID` as the source id."""
+    from agent_history.adapters import opencode
+    from test_opencode import shop_session
+    store.ingest(opencode.normalize(shop_session(tmp_path / "opencode.db")))
+    call = PARSERS["opencode"]({"cwd": "/workspace", "session_id": "ses_1111111111111111111111",
+                                "tool_use_id": "call_edit", "tool_name": "edit",
+                                "tool_input": {"filePath": "/workspace/shop.py", "oldString": "a", "newString": "b"}})
+    assert call.command == "/workspace/shop.py"
+    event = store.event(store.linked_event_id(call.session_id, call.tool_call_id))
+    assert event.kind == model.FILE_CHANGE and event.payload["source_id"] == "call_edit"

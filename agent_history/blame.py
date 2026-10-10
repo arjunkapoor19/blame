@@ -19,6 +19,7 @@ from __future__ import annotations
 import difflib
 import os
 import re
+import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -290,3 +291,32 @@ def _worth_showing(event: Event) -> bool:
     if event.kind in (model.TOKEN_USAGE, model.USER_MESSAGE):
         return False
     return event.kind != model.REASONING or bool(event.payload.get("summary"))
+
+
+def delegation(store: Store, turn: sqlite3.Row | None) -> tuple[sqlite3.Row | None, list[tuple[str, str | None]]]:
+    """For a sub-agent's turn: the person's turn it was delegated from, and each hand-off on the way
+    (sub-agent thread, prompt it was given), outermost first. Any other turn is its own top."""
+    chain: list[tuple[str, str | None]] = []
+    while turn is not None:
+        spawn = store.spawner(turn["thread_id"])
+        if spawn is None:
+            break
+        chain.insert(0, (turn["thread_id"], turn["input_text"]))
+        turn = store.turn(spawn.turn_id) if spawn.turn_id else None
+    return turn, chain
+
+
+def added_line_at(lines: list[str], number: int) -> int | None:
+    """Index of the added diff line that lands at line `number` of the new file, if any."""
+    new_line = 1
+    for index, text in enumerate(lines):
+        header = HUNK_HEADER.match(text)
+        if header:
+            new_line = int(header[3]) if int(header[4] or 1) else int(header[3]) + 1
+        elif text.startswith("+"):
+            if new_line == number:
+                return index
+            new_line += 1
+        elif not text.startswith(("-", "\\")):
+            new_line += 1
+    return None

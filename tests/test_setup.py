@@ -1,4 +1,6 @@
 import json
+import shutil
+import subprocess
 
 import pytest
 
@@ -75,3 +77,53 @@ def test_cli(homes, capsys):
     assert main(["setup", "--remove"]) == 0
     assert json.loads(claude.read_text()) == THEIRS
     assert main(["setup", "cursor"]) == 1
+
+
+def test_opencode_plugin_is_written_and_removed():
+    agent = agent_setup.AGENTS["opencode"]
+    plugin = agent.settings()
+    assert plugin.parts[-3:] == ("opencode", "plugin", "agent-history.js")
+    agent_setup.install(agent, "/old/ah")
+    agent_setup.install(agent, "/bin/ah", db="/data/my history.db")  # re-running replaces
+    text = plugin.read_text()
+    assert text.startswith("// agent-history") and 'const AH = ["/bin/ah", "--db", "/data/my history.db"]' in text
+    assert agent_setup.remove(agent) and not plugin.exists()
+    assert not agent_setup.remove(agent)
+
+
+def test_opencode_plugin_never_replaces_someone_elses_file():
+    agent = agent_setup.AGENTS["opencode"]
+    plugin = agent.settings()
+    plugin.parent.mkdir(parents=True)
+    plugin.write_text("export const Mine = async () => ({})\n")
+    with pytest.raises(ValueError):
+        agent_setup.install(agent, "/bin/ah")
+    assert not agent_setup.remove(agent)
+    assert plugin.read_text() == "export const Mine = async () => ({})\n"
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node to run the plugin")
+def test_opencode_plugin_runs_ah_around_tool_calls(tmp_path):
+    """Load the generated plugin and call its hooks the way opencode does."""
+    calls = tmp_path / "calls.jsonl"
+    fake_ah = tmp_path / "ah"
+    fake_ah.write_text(f'#!/bin/sh\nprintf \'{{"args": "%s", "stdin": %s}}\\n\' "$*" "$(cat)" >> {calls}\n')
+    fake_ah.chmod(0o755)
+    agent = agent_setup.AGENTS["opencode"]
+    agent_setup.install(agent, str(fake_ah))
+    script = tmp_path / "run.mjs"
+    script.write_text(f"""
+        import {{ AgentHistory }} from {json.dumps(str(agent.settings()))}
+        const hooks = await AgentHistory({{ directory: "/workspace" }})
+        const input = {{ tool: "bash", sessionID: "ses_1", callID: "call_1", args: {{ command: "sed -i x a.py" }} }}
+        await hooks["tool.execute.before"](input, {{ args: input.args }})
+        await hooks["tool.execute.after"](input, {{ title: "", output: "", metadata: {{}} }})
+        await hooks.event({{ event: {{ type: "message.updated", properties: {{}} }} }})
+        await hooks.event({{ event: {{ type: "session.idle", properties: {{ sessionID: "ses_1" }} }} }})
+    """)
+    subprocess.run(["node", str(script)], check=True, timeout=30)
+    seen = [json.loads(line) for line in calls.read_text().splitlines()]
+    assert [c["args"] for c in seen] == ["hook opencode pre", "hook opencode post", "hook opencode stop"]
+    assert seen[0]["stdin"] == {"cwd": "/workspace", "session_id": "ses_1", "tool_use_id": "call_1",
+                                "tool_name": "bash", "tool_input": {"command": "sed -i x a.py"}}
+    assert seen[2]["stdin"] == {"cwd": "/workspace", "session_id": "ses_1"}

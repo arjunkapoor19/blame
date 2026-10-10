@@ -12,8 +12,9 @@ from pathlib import Path
 
 from agent_history import hooks, model, sources
 from agent_history import setup as agent_setup
-from agent_history.blame import HUNK_HEADER, Author, BlamedLine, FileBlame, blame, observed_file_changes, story
-from agent_history.commands import is_test, read_only_label, summarize
+from agent_history.blame import (Author, BlamedLine, FileBlame, added_line_at, blame, delegation,
+                                 observed_file_changes, story)
+from agent_history.present import author_name, outline, relative
 from agent_history.model import Event
 from agent_history.store import DEFAULT_DB, Store, default_db_path
 
@@ -22,7 +23,8 @@ ORIGIN_WINDOW = 8  # diff lines shown either side of the blamed line when its ed
 DETAIL = " " * 21  # indents an event's details under its text in a story
 WIDTH = 100
 DIFF_COLORS = {"+": "32", "-": "31"}
-AUTHOR_WIDTH = 7
+AUTHOR_WIDTH = 8  # the longest agent name so far
+WHO_WIDTH = 29  # `session turn when`: 6 + 2 + 4 + 1 + 16
 AGENT_COLORS = ("35", "36", "34", "95", "96")  # per agent name, stable across runs
 
 COMMAND_MARKS = {"completed": "✓", "failed": "✗", "declined": "⊘", "interrupted": "…", "incomplete": "…"}
@@ -146,7 +148,9 @@ def cmd_log(store: Store, query: str | None) -> int:
     events = store.events(session_id=session["id"])
     for turn in store.turns(session["id"]):
         duration = _duration(turn["started_at"], turn["ended_at"])
-        print(f"\nturn {turn['seq']}  {turn['status']}{duration}")
+        top, chain = delegation(store, turn)
+        via = f"  sub-agent {turn['thread_id'][-8:]}, from turn {top['seq'] if top else '?'}" if chain else ""
+        print(f"\nturn {turn['seq']}  {turn['status']}{duration}{via}")
         for event in events:
             if event.turn_id == turn["id"]:
                 line = describe(event, session["cwd"])
@@ -174,13 +178,14 @@ def _blame_file(store: Store, result: FileBlame) -> int:
     if not result.on_disk:
         print("(file not on disk; showing content reconstructed from recorded changes)", file=sys.stderr)
     width = len(str(len(result.lines)))
-    print(_color("2", f"{'author':<{AUTHOR_WIDTH}} {'session turn time':<21}  {'#':>{width}}  code"))
+    print(_color("2", f"{'author':<{AUTHOR_WIDTH}} {'session turn when':<{WHO_WIDTH}}  {'#':>{width}}  code"))
     for line in result.lines:
         name = _author_name(line.author)
         who = _who(store, line.author) if line.author and line.author.kind != "baseline" else ""
         flag = "≈" if line.author and line.author.concurrent else " "
         text = line.text if line.text is not None else "…"
-        print(f"{_color(_author_color(name), f'{name:<{AUTHOR_WIDTH}}')} {who:<21}{flag} {line.number:>{width}}  {text}")
+        print(f"{_color(_author_color(name), f'{name:<{AUTHOR_WIDTH}}')} {who:<{WHO_WIDTH}}{flag} "
+              f"{line.number:>{width}}  {text}")
     counts = Counter(_author_name(line.author) or "untracked" for line in result.lines)
     labels = {"·": "pre-existing", "you": "outside any agent"}
     print("\n" + " · ".join(f"{count} {labels.get(name, name)}" for name, count in counts.most_common()))
@@ -221,13 +226,20 @@ def _blame_line(store: Store, path: str, line: BlamedLine) -> int:
     origin = line.origin
     session = store.find_session(origin.session_id)
     cwd = session["cwd"] if session else None
-    turn = store.turn(origin.turn_id) if origin.turn_id else None
+    top, chain = delegation(store, store.turn(origin.turn_id) if origin.turn_id else None)
+    via = "".join(f" › sub-agent {thread[-8:]}" for thread, _ in chain)
     seen = " · observed by ah" if author.observation else ""
     print(f"written by {author.agent or 'an agent'} · session {origin.session_id} · "
-          f"turn {turn['seq'] if turn else '?'} · {_time(origin.started_at, date=True)}{seen}\n")
+          f"turn {top['seq'] if top else '?'}{via} · {_time(origin.started_at, date=True)}{seen}\n")
 
     told = story(store, origin)
-    if told.prompt:
+    if chain:
+        if top is not None and top["input_text"]:
+            print(f"You asked: {_quote(top['input_text'], 300)}")
+        for thread, prompt in chain:
+            print(f"  → handed to sub-agent {thread[-8:]}: {_quote(prompt or '', 300)}")
+        print()
+    elif told.prompt:
         print(f"You asked: {_quote(told.prompt, 300)}\n")
     if told.hidden_before:
         print(f"    … {told.hidden_before} earlier steps (ah log {origin.session_id})")
@@ -247,7 +259,7 @@ def _blame_line(store: Store, path: str, line: BlamedLine) -> int:
         for who, text in line.history:
             name = _author_name(who) or "?"
             print(f"  {_color(_author_color(name), f'{name:<{AUTHOR_WIDTH}}')} "
-                  f"{_who(store, who) if who else '':<21}  {text}")
+                  f"{_who(store, who) if who else '':<{WHO_WIDTH}}  {text}")
     print("\nSteps are shown in order; order is not proof of cause.")
     return 0
 
@@ -276,7 +288,7 @@ def _story_lines(event: Event, cwd: str | None, blamed_path: str, blamed_at: int
     details: list[str] = []
     for change in event.file_changes:
         if len(event.file_changes) > 1 or event.kind != model.FILE_CHANGE:  # e.g. what a command changed
-            details.append(("changed " if event.kind != model.FILE_CHANGE else "") + _relative(change.path, cwd) + ":")
+            details.append(("changed " if event.kind != model.FILE_CHANGE else "") + relative(change.path, cwd) + ":")
         origin = blamed_at is not None and change.path == blamed_path
         details += _diff_lines(change, None if origin else DIFF_PREVIEW, blamed_at if origin else None)
     return [summary] + details
@@ -289,7 +301,7 @@ def _diff_lines(change: model.FileChange, limit: int | None, mark: int | None) -
         return ["│ " + _color("31", "(file deleted)")]
     raw = change.diff or ""
     lines = ["+" + text for text in raw.splitlines()] if change.kind == model.ADD else raw.splitlines()
-    marked = _added_line_at(lines, mark) if mark is not None else None
+    marked = added_line_at(lines, mark) if mark is not None else None
     if marked is None:
         start, end = 0, len(lines) if limit is None else min(limit, len(lines))
     elif len(lines) <= 2 * ORIGIN_WINDOW + 1:
@@ -304,22 +316,6 @@ def _diff_lines(change: model.FileChange, limit: int | None, mark: int | None) -
     if end < len(lines):
         out.append("│ " + _color("2", f"… {len(lines) - end} more lines"))
     return out
-
-
-def _added_line_at(lines: list[str], number: int) -> int | None:
-    """Index of the added diff line that lands at line `number` of the new file, if any."""
-    new_line = 1
-    for index, text in enumerate(lines):
-        header = HUNK_HEADER.match(text)
-        if header:
-            new_line = int(header[3]) if int(header[4] or 1) else int(header[3]) + 1
-        elif text.startswith("+"):
-            if new_line == number:
-                return index
-            new_line += 1
-        elif not text.startswith(("-", "\\")):
-            new_line += 1
-    return None
 
 
 def _color(code: str, text: str) -> str:
@@ -338,24 +334,17 @@ def _wrap(text: str, width: int) -> list[str]:
 
 
 def _who(store: Store, author: Author) -> str:
-    """Short `session turn time` label, e.g. `39de3d  t1   13:22:33`."""
+    """Short `session turn when` label, e.g. `39de3d  t1   Oct 07 '26 13:22`."""
     event = author.event
     if event is not None:
-        turn = store.turn(event.turn_id) if event.turn_id else None
-        return f"{event.session_id[-6:]:<6}  t{turn['seq'] if turn else '?':<3} {_time(event.started_at)}"
+        turn, _ = delegation(store, store.turn(event.turn_id) if event.turn_id else None)  # the turn you asked in
+        return f"{event.session_id[-6:]:<6}  t{turn['seq'] if turn else '?':<3} {_when(event.started_at)}"
     obs = author.observation or {}
-    return f"{(obs.get('agent_session_id') or '')[-6:]:<6}  {'':<4} {_time(obs.get('ended_at'))}"
+    return f"{(obs.get('agent_session_id') or '')[-6:]:<6}  {'':<4} {_when(obs.get('ended_at'))}"
 
 
 def _author_name(author: Author | None) -> str:
-    """The agent's name up to its first `-`, `you` for edits outside any agent, `·` for pre-existing lines."""
-    if author is None:
-        return ""
-    if author.kind == "outside":
-        return "you"
-    if author.kind == "baseline":
-        return "·"
-    return (author.agent or "agent").split("-")[0][:AUTHOR_WIDTH]
+    return author_name(author)[:AUTHOR_WIDTH]
 
 
 def _author_color(name: str) -> str:
@@ -368,50 +357,28 @@ def _author_color(name: str) -> str:
 
 def describe(event: Event, cwd: str | None = None) -> str | None:
     """One-line summary of an event, or None if it isn't worth a line in a timeline."""
-    p = event.payload
-    if event.kind == model.USER_MESSAGE:
-        return f"user     {_quote(p.get('text'), 100)}"
-    if event.kind == model.AGENT_MESSAGE:
-        label = "answer" if p.get("phase") == "final" else "agent"
-        return f"{label:<8} {_first_line(p.get('text'), 100)}"
-    if event.kind == model.COMMAND:
-        reads = read_only_label(p) if event.status == "completed" else None
-        if reads:
-            return f"read     {reads}"
-        label = "test" if is_test(p.get("command")) else "command"
-        mark = COMMAND_MARKS.get(event.status or "", "?")
-        summary = summarize(p, event.status)
-        if summary is None and p.get("exit_code") not in (0, None):
-            summary = f"exit {p['exit_code']}"
-        return f"{label:<8} {mark} {_first_line(p.get('command'), 60)}{'  → ' + summary if summary else ''}"
-    if event.kind == model.FILE_CHANGE:
-        signs = {model.ADD: "+", model.DELETE: "-", model.UPDATE: "~", model.MOVE: "→"}
-        files = ", ".join(f"{signs.get(c.kind, '~')}{_relative(c.path, cwd)}" for c in event.file_changes)
-        status = "" if event.status in (None, "completed") else f"  ({event.status})"
-        return f"edit     {files}{status}"
-    if event.kind == model.APPROVAL:
-        return f"approval {event.status or 'unanswered'}: {_first_line(p.get('command') or p.get('subject'), 80)}"
-    if event.kind == model.TOOL_CALL:
-        reads = read_only_label(p) if event.status == "completed" else None
-        if reads:
-            return f"read     {reads}"
-        name = "/".join(str(x) for x in (p.get("server"), p.get("tool")) if x)
-        return f"tool     {name} ({event.status})"
-    if event.kind == model.SUBAGENT_CALL:
-        receivers = ", ".join(t[-8:] for t in p.get("receiver_thread_ids") or [])
-        target = f" → {receivers}" if receivers else ""
-        return f"subagent {p.get('action')}{target}  {_quote(p.get('description') or p.get('prompt'), 60)}"
-    if event.kind == model.ERROR:
-        return f"error    {_first_line(p.get('message'), 100)}"
-    if event.kind == model.REASONING and p.get("summary"):
-        return f"thinking {_first_line(' '.join(map(str, p['summary'])), 100)}"
-    return None
-
-
-def _relative(path: str, cwd: str | None) -> str:
-    if cwd and path.startswith(cwd.rstrip("/") + "/"):
-        return os.path.relpath(path, cwd)
-    return path
+    step = outline(event, cwd)
+    if step is None:
+        return None
+    label, title = step.label, step.title
+    if label == "user":
+        text = _quote(title, 100)
+    elif label in ("test", "command"):
+        mark = COMMAND_MARKS.get(step.status or "", "?")
+        text = f"{mark} {_first_line(title, 60)}{'  → ' + step.summary if step.summary else ''}"
+    elif label == "edit":
+        text = title + ("" if step.status in (None, "completed") else f"  ({step.status})")
+    elif label == "approval":
+        text = f"{step.status or 'unanswered'}: {_first_line(title, 80)}"
+    elif label == "tool":
+        text = f"{title} ({step.status})"
+    elif label == "subagent":
+        text = f"{title}  {_quote(step.summary, 60)}"
+    elif label == "read":
+        text = title
+    else:  # agent, answer, error, thinking
+        text = _first_line(title, 100)
+    return f"{label:<8} {text}"
 
 
 def _first_line(text: str | None, limit: int) -> str:
@@ -431,6 +398,14 @@ def _time(ms: int | None, date: bool = False) -> str:
         return "--:--:--"
     moment = datetime.fromtimestamp(ms / 1000, tz=timezone.utc).astimezone()  # the viewer's local time
     return moment.strftime("%Y-%m-%d %H:%M:%S %Z" if date else "%H:%M:%S")
+
+
+def _when(ms: int | None) -> str:
+    """Date and minute for blame columns, always the same width: `Oct 07 '26 15:11`."""
+    if ms is None:
+        return "--- -- --- --:--"
+    moment = datetime.fromtimestamp(ms / 1000, tz=timezone.utc).astimezone()
+    return moment.strftime("%b %d '%y %H:%M")
 
 
 def _duration(start: int | None, end: int | None) -> str:
